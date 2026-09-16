@@ -302,6 +302,14 @@ def index():
     return render_template_string(INDEX_HTML, refresh_seconds=REFRESH_SECONDS)
 
 
+@app.route("/nfatat")
+def nfatat_index():
+    html = INDEX_HTML.replace("/api/data", "/nfatat/data").replace(
+        "Live PR Report", "Live NFA TAT Report").replace(
+        "Live SAP PR Report", "Live NFA TAT Report")
+    return render_template_string(html, refresh_seconds=REFRESH_SECONDS)
+
+
 @app.route("/api/data")
 def api_data():
     try:
