@@ -314,6 +314,26 @@ def api_data():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+@app.route("/nfatat/data")
+def nfatat_data():
+    """Full NFA TAT report (rolling window), flat JSON like /api/data.
+    Optional overrides: ?startdate=YYYY-MM-DD&enddate=YYYY-MM-DD"""
+    try:
+        from datetime import timedelta
+        end = request.args.get("enddate") or datetime.now().date().isoformat()
+        start = request.args.get("startdate") or (
+            datetime.now().date() - timedelta(days=cfg.NFATAT_ROLLING_DAYS)
+        ).isoformat()
+        url = f"{cfg.NFATAT_SOURCE_URL_BASE}?startdate={start}&enddate={end}"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        rows = normalize_rows(resp.json())
+        return jsonify({"ok": True, "rows": rows, "count": len(rows),
+                        "startdate": start, "enddate": end})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
 @app.route("/odata/PRReportHistory")
 def odata_pr_report_history():
     """
