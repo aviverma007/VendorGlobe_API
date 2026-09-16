@@ -126,7 +126,13 @@ INDEX_HTML = """
     padding: 6px 10px; border-radius: 6px; width: 240px;
   }
   #search:focus { outline: none; border-color: var(--accent); }
-  .table-wrap { overflow: auto; height: calc(100vh - 58px); }
+  .table-wrap { overflow: auto; height: calc(100vh - 78px); }
+  .top-scroll { overflow-x: auto; overflow-y: hidden; height: 20px; }
+  .top-scroll .spacer { height: 1px; }
+  .table-wrap::-webkit-scrollbar, .top-scroll::-webkit-scrollbar { height: 14px; width: 14px; }
+  .table-wrap::-webkit-scrollbar-thumb, .top-scroll::-webkit-scrollbar-thumb { background: #5a6b8c; border-radius: 7px; border: 3px solid transparent; background-clip: content-box; }
+  .table-wrap::-webkit-scrollbar-thumb:hover, .top-scroll::-webkit-scrollbar-thumb:hover { background: #7d8fb3; border: 3px solid transparent; background-clip: content-box; }
+  .table-wrap::-webkit-scrollbar-track, .top-scroll::-webkit-scrollbar-track { background: rgba(255,255,255,0.06); }
   table { border-collapse: collapse; width: 100%; white-space: nowrap; }
   thead th {
     position: sticky; top: 0; background: var(--panel); color: var(--accent);
@@ -152,7 +158,8 @@ INDEX_HTML = """
 </header>
 <div class="err-banner" id="errBanner"></div>
 <div class="meta" id="meta"></div>
-<div class="table-wrap">
+<div class="top-scroll" id="topScroll"><div class="spacer" id="topSpacer"></div></div>
+<div class="table-wrap" id="tableWrap">
   <table>
     <thead><tr id="headRow"></tr></thead>
     <tbody id="body"></tbody>
@@ -253,6 +260,17 @@ document.getElementById('search').addEventListener('input', renderBody);
 
 refresh();
 setInterval(refresh, REFRESH_MS);
+
+// --- synced top scrollbar ---
+const topScroll = document.getElementById('topScroll');
+const tableWrap = document.getElementById('tableWrap');
+const topSpacer = document.getElementById('topSpacer');
+let syncing = false;
+topScroll.addEventListener('scroll', () => { if (syncing) { syncing = false; return; } syncing = true; tableWrap.scrollLeft = topScroll.scrollLeft; });
+tableWrap.addEventListener('scroll', () => { if (syncing) { syncing = false; return; } syncing = true; topScroll.scrollLeft = tableWrap.scrollLeft; });
+new ResizeObserver(() => { topSpacer.style.width = tableWrap.scrollWidth + 'px'; }).observe(tableWrap.querySelector('table'));
+setInterval(() => { topSpacer.style.width = tableWrap.scrollWidth + 'px'; }, 1000);
+
 </script>
 </body>
 </html>
