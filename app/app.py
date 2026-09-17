@@ -72,7 +72,7 @@ def _log_request(response):
     return response
 
 PORT = cfg.PORT
-REFRESH_SECONDS = 5
+REFRESH_SECONDS = 60
 
 INDEX_HTML = r"""<!DOCTYPE html>
 <html>
@@ -337,12 +337,12 @@ def _table_page(title, data_url, only_cols=None, fixed_filters=None):
 
 @app.route("/")
 def index():
-    return _table_page("Live PR Report", "/api/data")
+    return _table_page("Live PR Report", "/db/pr")
 
 
 @app.route("/nfatat")
 def nfatat_index():
-    return _table_page("Live NFA TAT Report", "/nfatat/data")
+    return _table_page("Live NFA TAT Report", "/db/nfatat")
 
 
 @app.route("/nfatat/returned")
@@ -350,11 +350,51 @@ def nfatat_returned():
     """Focused view: Returned PRs only, key workflow columns."""
     return _table_page(
         "Returned PRs - NFA TAT",
-        "/nfatat/data",
+        "/db/nfatat",
         only_cols=["EPR_No", "PRH_Status", "PRH_Status_Desc", "CP_Team_Date",
                    "Assignee_Team_Date", "Assignee_Team_Msg", "CP_Team_Msg"],
         fixed_filters={"PRH_Status_Desc": "Returned"},
     )
+
+
+def _db_rows(table_name):
+    """All rows from our SQL table as a list of dicts (instant, no vendor call)."""
+    import pyodbc
+    conn = pyodbc.connect(
+        f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
+        f"DATABASE={cfg.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes;",
+        timeout=8,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM [dbo].[{table_name}] ORDER BY fetched_at DESC")
+        cols = [d[0] for d in cur.description]
+        return [
+            {c: (str(v) if v is not None else None) for c, v in zip(cols, row)}
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+@app.route("/db/pr")
+def db_pr():
+    """PR table from OUR database - instant, synced every 45s."""
+    try:
+        rows = _db_rows(cfg.TABLE_NAME)
+        return jsonify({"ok": True, "rows": rows, "count": len(rows), "source": "db"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
+@app.route("/db/nfatat")
+def db_nfatat():
+    """NFA TAT table from OUR database - instant, synced every 5 min."""
+    try:
+        rows = _db_rows(cfg.NFATAT_TABLE_NAME)
+        return jsonify({"ok": True, "rows": rows, "count": len(rows), "source": "db"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 @app.route("/api/data")
