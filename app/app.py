@@ -347,10 +347,16 @@ def nfatat_index():
 
 @app.route("/nfatat/returned")
 def nfatat_returned():
-    """Focused view: Returned PRs only, key workflow columns."""
+    """Focused view: Returned PRs only, key workflow columns.
+    Fetches a full year (?days=N to override) so old returned PRs
+    are included, not just the 30-day sync window."""
+    from datetime import timedelta
+    days = int(request.args.get("days", "365"))
+    start = (datetime.now().date() - timedelta(days=days)).isoformat()
+    end = datetime.now().date().isoformat()
     return _table_page(
         "Returned PRs - NFA TAT",
-        "/nfatat/data",
+        f"/nfatat/data?startdate={start}&enddate={end}",
         only_cols=["EPR_No", "PRH_Status", "PRH_Status_Desc", "CP_Team_Date",
                    "Assignee_Team_Date", "Assignee_Team_Msg", "CP_Team_Msg"],
         fixed_filters={"PRH_Status_Desc": "Returned"},
