@@ -369,8 +369,10 @@ def _db_rows(table_name):
         cur = conn.cursor()
         cur.execute(f"SELECT * FROM [dbo].[{table_name}] ORDER BY fetched_at DESC")
         cols = [d[0] for d in cur.description]
+        hidden = {"fetched_at", "first_seen"}  # internal sync metadata
         return [
-            {c: (str(v) if v is not None else None) for c, v in zip(cols, row)}
+            {c: (str(v) if v is not None else None)
+             for c, v in zip(cols, row) if c not in hidden}
             for row in cur.fetchall()
         ]
     finally:
