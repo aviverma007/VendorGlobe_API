@@ -348,10 +348,9 @@ def nfatat_index():
 @app.route("/nfatat/returned")
 def nfatat_returned():
     """Focused view: Returned PRs only, key workflow columns.
-    Fetches a full year (?days=N to override) so old returned PRs
-    are included, not just the 30-day sync window."""
+    Last 30 days by default; override with ?days=N (e.g. ?days=365)."""
     from datetime import timedelta
-    days = int(request.args.get("days", "365"))
+    days = int(request.args.get("days", "30"))
     start = (datetime.now().date() - timedelta(days=days)).isoformat()
     end = datetime.now().date().isoformat()
     return _table_page(
