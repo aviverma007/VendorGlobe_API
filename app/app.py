@@ -74,203 +74,188 @@ def _log_request(response):
 PORT = cfg.PORT
 REFRESH_SECONDS = 5
 
-INDEX_HTML = """
-<!DOCTYPE html>
-<html lang="en">
+INDEX_HTML = r"""<!DOCTYPE html>
+<html>
 <head>
-<meta charset="UTF-8">
-<title>Live PR Report</title>
+<meta charset="utf-8">
+<title>{{ title }}</title>
 <style>
-  :root {
-    --bg: #0f1115;
-    --panel: #161a21;
-    --border: #2a2f3a;
-    --text: #e6e9ef;
-    --muted: #8b93a5;
-    --accent: #4f9dff;
-    --row-alt: #12151b;
-    --row-hover: #1c2129;
-  }
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-    font-size: 13px;
-  }
-  header {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .status { display: flex; align-items: center; gap: 8px; color: var(--muted); }
-  .dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #3ddc84; box-shadow: 0 0 6px #3ddc84;
-    animation: pulse 1.5s infinite;
-  }
-  .dot.error { background: #ff5c5c; box-shadow: 0 0 6px #ff5c5c; animation: none; }
-  @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
-  #search {
-    background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    padding: 6px 10px; border-radius: 6px; width: 240px;
-  }
-  #search:focus { outline: none; border-color: var(--accent); }
-  .table-wrap { overflow: auto; height: calc(100vh - 78px); }
-  .top-scroll { overflow-x: auto; overflow-y: hidden; height: 20px; }
-  .top-scroll .spacer { height: 1px; }
-  .table-wrap::-webkit-scrollbar, .top-scroll::-webkit-scrollbar { height: 14px; width: 14px; }
-  .table-wrap::-webkit-scrollbar-thumb, .top-scroll::-webkit-scrollbar-thumb { background: #5a6b8c; border-radius: 7px; border: 3px solid transparent; background-clip: content-box; }
-  .table-wrap::-webkit-scrollbar-thumb:hover, .top-scroll::-webkit-scrollbar-thumb:hover { background: #7d8fb3; border: 3px solid transparent; background-clip: content-box; }
-  .table-wrap::-webkit-scrollbar-track, .top-scroll::-webkit-scrollbar-track { background: rgba(255,255,255,0.06); }
-  table { border-collapse: collapse; width: 100%; white-space: nowrap; }
-  thead th {
-    position: sticky; top: 0; background: var(--panel); color: var(--accent);
-    text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border);
-    font-weight: 600; z-index: 5; cursor: pointer; user-select: none;
-  }
-  thead th:hover { color: #fff; }
-  tbody td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
-  tbody tr:nth-child(even) { background: var(--row-alt); }
-  tbody tr:hover { background: var(--row-hover); }
-  .meta { color: var(--muted); padding: 10px 20px; }
-  .err-banner { color: #ff5c5c; padding: 10px 20px; display: none; }
+  body { margin:0; font-family: 'Segoe UI', system-ui, sans-serif; background:#0d1117; color:#e6edf3; }
+  .bar { display:flex; align-items:center; gap:14px; padding:10px 16px; background:#161b22; border-bottom:1px solid #30363d; flex-wrap:wrap; }
+  .bar h1 { font-size:16px; margin:0; white-space:nowrap; }
+  .bar input[type=text] { background:#0d1117; border:1px solid #30363d; color:#e6edf3; border-radius:6px; padding:6px 10px; width:220px; }
+  .bar .right { margin-left:auto; display:flex; align-items:center; gap:10px; font-size:12px; color:#8b949e; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#3fb950; display:inline-block; margin-right:5px; }
+  .count { padding:5px 16px; font-size:12px; color:#8b949e; background:#161b22; border-bottom:1px solid #30363d; display:flex; gap:16px; align-items:center; flex-wrap:wrap;}
+  button, select { background:#21262d; border:1px solid #30363d; color:#e6edf3; border-radius:6px; padding:5px 12px; cursor:pointer; font-size:12px; }
+  button:hover { background:#30363d; }
+  .top-scroll { overflow-x:auto; overflow-y:hidden; height:18px; }
+  .top-scroll .spacer { height:1px; }
+  .table-wrap { overflow:auto; height: calc(100vh - 118px); }
+  ::-webkit-scrollbar { height:14px; width:14px; }
+  ::-webkit-scrollbar-thumb { background:#5a6b8c; border-radius:7px; border:3px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-thumb:hover { background:#7d8fb3; border:3px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-track { background:rgba(255,255,255,0.06); }
+  table { border-collapse:collapse; font-size:12.5px; min-width:100%; }
+  th, td { padding:7px 12px; border-bottom:1px solid #21262d; white-space:nowrap; text-align:left; max-width:420px; overflow:hidden; text-overflow:ellipsis; }
+  thead th { position:sticky; top:0; background:#161b22; color:#58a6ff; cursor:pointer; z-index:2; border-bottom:1px solid #30363d; }
+  thead tr.filters th { top:33px; cursor:default; padding:4px 8px; z-index:1; }
+  thead tr.filters input { width:110px; background:#0d1117; border:1px solid #30363d; color:#e6edf3; border-radius:4px; padding:3px 6px; font-size:11px; }
+  thead tr.filters input.rng { width:53px; }
+  tbody tr:hover { background:#161b22; }
+  .hint { color:#484f58; font-size:10px; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Live PR Report</h1>
-  <input id="search" type="text" placeholder="Filter rows..." />
-  <div class="status">
-    <span class="dot" id="dot"></span>
-    <span id="statusText">Loading...</span>
+<div class="bar">
+  <h1>{{ title }}</h1>
+  <input type="text" id="globalFilter" placeholder="Filter all columns...">
+  <div class="right">
+    <select id="dlScope">
+      <option value="filtered">Download: filtered rows</option>
+      <option value="latest100">Download: latest 100</option>
+      <option value="all">Download: all rows</option>
+    </select>
+    <button onclick="downloadExcel()">&#11015; Excel</button>
+    <button onclick="clearFilters()">Clear filters</button>
+    <span><span class="dot"></span>Live &middot; updated <span id="updated">-</span></span>
   </div>
-</header>
-<div class="err-banner" id="errBanner"></div>
-<div class="meta" id="meta"></div>
+</div>
+<div class="count"><span id="rowCount">loading...</span>
+  <span class="hint">Column filters: type text to match &middot; numeric/date columns also have min/max range boxes &middot; click a column name to sort</span>
+</div>
 <div class="top-scroll" id="topScroll"><div class="spacer" id="topSpacer"></div></div>
 <div class="table-wrap" id="tableWrap">
   <table>
-    <thead><tr id="headRow"></tr></thead>
-    <tbody id="body"></tbody>
+    <thead>
+      <tr id="headRow"></tr>
+      <tr class="filters" id="filterRow"></tr>
+    </thead>
+    <tbody id="tbody"></tbody>
   </table>
 </div>
-
 <script>
-const REFRESH_MS = {{ refresh_seconds }} * 1000;
-let rawRows = [];
-let columns = [];
-let sortCol = null;
-let sortDir = 1;
+const DATA_URL = "{{ data_url }}";
+const ONLY_COLS = {{ only_cols | tojson }};
+const FIXED_FILTERS = {{ fixed_filters | tojson }};
+let rawRows = [], columns = [], colFilters = {}, rangeFilters = {}, sortCol = null, sortDir = 1, numericCols = {};
 
-function setStatus(ok, text) {
-  document.getElementById('dot').className = ok ? 'dot' : 'dot error';
-  document.getElementById('statusText').textContent = text;
-}
+function isNumericLike(v){ if(v===null||v===undefined||v==='')return false; const t=String(v).replace(/,/g,'').replace(/\s*Lacs?\s*$/i,''); return t!=='' && !isNaN(t); }
+function numVal(v){ return parseFloat(String(v).replace(/,/g,'').replace(/\s*Lacs?\s*$/i,'')); }
+function isDateLike(v){ return typeof v==='string' && /^\d{4}-\d{2}-\d{2}/.test(v); }
 
-function renderHead() {
-  const headRow = document.getElementById('headRow');
-  headRow.innerHTML = '';
-  columns.forEach(col => {
-    const th = document.createElement('th');
-    th.textContent = col + (sortCol === col ? (sortDir === 1 ? ' \u25B2' : ' \u25BC') : '');
-    th.onclick = () => {
-      if (sortCol === col) { sortDir *= -1; } else { sortCol = col; sortDir = 1; }
-      renderHead();
-      renderBody();
-    };
-    headRow.appendChild(th);
-  });
-}
-
-function renderBody() {
-  const filter = document.getElementById('search').value.toLowerCase();
-  let rows = rawRows.filter(r => !filter || JSON.stringify(r).toLowerCase().includes(filter));
-
-  if (sortCol) {
-    rows = rows.slice().sort((a, b) => {
-      const av = (a[sortCol] ?? '').toString();
-      const bv = (b[sortCol] ?? '').toString();
-      const an = parseFloat(av), bn = parseFloat(bv);
-      let cmp;
-      if (!isNaN(an) && !isNaN(bn) && av.trim() !== '' && bv.trim() !== '') {
-        cmp = an - bn;
-      } else {
-        cmp = av.localeCompare(bv);
+async function load(){
+  try{
+    const res = await fetch(DATA_URL);
+    const data = await res.json();
+    let rows = data.rows || data.value || (Array.isArray(data)?data:[]);
+    // fixed filters (e.g. Returned view)
+    for(const [k,v] of Object.entries(FIXED_FILTERS)) rows = rows.filter(r => String(r[k]??'').trim().toLowerCase() === v.toLowerCase());
+    rawRows = rows;
+    if(rows.length){
+      columns = ONLY_COLS.length ? ONLY_COLS.filter(c=>c in rows[0]) : Object.keys(rows[0]).sort();
+      // detect numeric / date columns from a sample
+      numericCols = {};
+      for(const c of columns){
+        let num=0, date=0, n=0;
+        for(const r of rows.slice(0,80)){ const v=r[c]; if(v===null||v===''||v===undefined)continue; n++; if(isNumericLike(v))num++; if(isDateLike(v))date++; }
+        if(n>0 && date/n>0.7) numericCols[c]='date'; else if(n>0 && num/n>0.7) numericCols[c]='num';
       }
-      return cmp * sortDir;
-    });
-  }
-
-  const body = document.getElementById('body');
-  body.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  rows.forEach(row => {
-    const tr = document.createElement('tr');
-    columns.forEach(col => {
-      const td = document.createElement('td');
-      const val = row[col];
-      td.textContent = (val === null || val === undefined) ? '' : val;
-      tr.appendChild(td);
-    });
-    frag.appendChild(tr);
-  });
-  body.appendChild(frag);
-
-  document.getElementById('meta').textContent =
-    `${rows.length} of ${rawRows.length} rows` + (filter ? ' (filtered)' : '');
-}
-
-async function refresh() {
-  try {
-    const res = await fetch('/api/data');
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'Unknown error');
-
-    rawRows = json.rows;
-    if (rawRows.length > 0) {
-      const newColumns = Object.keys(rawRows[0]);
-      if (JSON.stringify(newColumns) !== JSON.stringify(columns)) {
-        columns = newColumns;
-        renderHead();
-      }
+      buildHeader();
     }
-    renderBody();
-    document.getElementById('errBanner').style.display = 'none';
-    setStatus(true, 'Live \u00b7 updated ' + new Date().toLocaleTimeString());
-  } catch (e) {
-    setStatus(false, 'Error \u00b7 retrying...');
-    const banner = document.getElementById('errBanner');
-    banner.textContent = 'Fetch failed: ' + e.message;
-    banner.style.display = 'block';
+    render();
+    document.getElementById('updated').textContent = new Date().toLocaleTimeString();
+  }catch(e){ console.error(e); }
+}
+
+function buildHeader(){
+  const hr=document.getElementById('headRow'), fr=document.getElementById('filterRow');
+  if(hr.children.length===columns.length) return;
+  hr.innerHTML=''; fr.innerHTML='';
+  for(const c of columns){
+    const th=document.createElement('th'); th.textContent=c;
+    th.onclick=()=>{ if(sortCol===c)sortDir*=-1; else {sortCol=c;sortDir=1;} render(); };
+    hr.appendChild(th);
+    const fth=document.createElement('th');
+    const inp=document.createElement('input'); inp.placeholder='filter';
+    inp.oninput=()=>{ colFilters[c]=inp.value.toLowerCase(); render(); };
+    fth.appendChild(inp);
+    if(numericCols[c]){
+      const mn=document.createElement('input'); mn.placeholder='min'; mn.className='rng';
+      const mx=document.createElement('input'); mx.placeholder='max'; mx.className='rng';
+      mn.oninput=()=>{ rangeFilters[c]=rangeFilters[c]||{}; rangeFilters[c].min=mn.value; render(); };
+      mx.oninput=()=>{ rangeFilters[c]=rangeFilters[c]||{}; rangeFilters[c].max=mx.value; render(); };
+      fth.appendChild(document.createElement('br')); fth.appendChild(mn); fth.appendChild(mx);
+    }
+    fr.appendChild(fth);
   }
 }
 
-document.getElementById('search').addEventListener('input', renderBody);
+function passes(r){
+  const g=document.getElementById('globalFilter').value.toLowerCase();
+  if(g && !columns.some(c=>String(r[c]??'').toLowerCase().includes(g))) return false;
+  for(const [c,f] of Object.entries(colFilters)){ if(f && !String(r[c]??'').toLowerCase().includes(f)) return false; }
+  for(const [c,rf] of Object.entries(rangeFilters)){
+    const v=r[c]; if(v===null||v===undefined||v==='') { if(rf.min||rf.max) return false; continue; }
+    if(numericCols[c]==='date'){ const s=String(v).slice(0,10); if(rf.min && s<rf.min) return false; if(rf.max && s>rf.max) return false; }
+    else { const n=numVal(v); if(isNaN(n)) return false; if(rf.min!=='' && rf.min!==undefined && n<parseFloat(rf.min)) return false; if(rf.max!=='' && rf.max!==undefined && n>parseFloat(rf.max)) return false; }
+  }
+  return true;
+}
 
-refresh();
-setInterval(refresh, REFRESH_MS);
+function filteredRows(){
+  let rows = rawRows.filter(passes);
+  if(sortCol){
+    rows=[...rows].sort((a,b)=>{ const x=a[sortCol]??'', y=b[sortCol]??'';
+      if(numericCols[sortCol]==='num') return (numVal(x)-numVal(y))*sortDir;
+      return String(x).localeCompare(String(y))*sortDir; });
+  }
+  return rows;
+}
 
-// --- synced top scrollbar ---
-const topScroll = document.getElementById('topScroll');
-const tableWrap = document.getElementById('tableWrap');
-const topSpacer = document.getElementById('topSpacer');
-let syncing = false;
-topScroll.addEventListener('scroll', () => { if (syncing) { syncing = false; return; } syncing = true; tableWrap.scrollLeft = topScroll.scrollLeft; });
-tableWrap.addEventListener('scroll', () => { if (syncing) { syncing = false; return; } syncing = true; topScroll.scrollLeft = tableWrap.scrollLeft; });
-new ResizeObserver(() => { topSpacer.style.width = tableWrap.scrollWidth + 'px'; }).observe(tableWrap.querySelector('table'));
-setInterval(() => { topSpacer.style.width = tableWrap.scrollWidth + 'px'; }, 1000);
+function render(){
+  const rows=filteredRows();
+  const tb=document.getElementById('tbody'); tb.innerHTML='';
+  const frag=document.createDocumentFragment();
+  for(const r of rows){
+    const tr=document.createElement('tr');
+    for(const c of columns){ const td=document.createElement('td'); const v=r[c]; td.textContent=(v===null||v===undefined)?'':v; td.title=td.textContent; tr.appendChild(td); }
+    frag.appendChild(tr);
+  }
+  tb.appendChild(frag);
+  document.getElementById('rowCount').textContent = rows.length+' of '+rawRows.length+' rows';
+  document.getElementById('topSpacer').style.width=document.getElementById('tableWrap').scrollWidth+'px';
+}
 
+function clearFilters(){
+  colFilters={}; rangeFilters={}; document.getElementById('globalFilter').value='';
+  document.querySelectorAll('#filterRow input').forEach(i=>i.value='');
+  render();
+}
+
+function downloadExcel(){
+  const scope=document.getElementById('dlScope').value;
+  let rows = scope==='all' ? rawRows : filteredRows();
+  if(scope==='latest100') rows = rows.slice(0,100);
+  const esc=v=>{ v=(v===null||v===undefined)?'':String(v); return '"'+v.replace(/"/g,'""')+'"'; };
+  let csv='\uFEFF'+columns.map(esc).join(',')+'\n';
+  for(const r of rows) csv+=columns.map(c=>esc(r[c])).join(',')+'\n';
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='{{ title }}'.replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+// synced top scrollbar
+const topScroll=document.getElementById('topScroll'), tableWrap=document.getElementById('tableWrap');
+let syncing=false;
+topScroll.addEventListener('scroll',()=>{ if(syncing){syncing=false;return;} syncing=true; tableWrap.scrollLeft=topScroll.scrollLeft; });
+tableWrap.addEventListener('scroll',()=>{ if(syncing){syncing=false;return;} syncing=true; topScroll.scrollLeft=tableWrap.scrollLeft; });
+
+document.getElementById('globalFilter').addEventListener('input', render);
+load();
+setInterval(load, {{ refresh_seconds }} * 1000);
 </script>
 </body>
 </html>
@@ -315,17 +300,34 @@ def health():
         return jsonify(out), 503
 
 
+def _table_page(title, data_url, only_cols=None, fixed_filters=None):
+    return render_template_string(
+        INDEX_HTML, refresh_seconds=REFRESH_SECONDS, title=title,
+        data_url=data_url, only_cols=only_cols or [],
+        fixed_filters=fixed_filters or {},
+    )
+
+
 @app.route("/")
 def index():
-    return render_template_string(INDEX_HTML, refresh_seconds=REFRESH_SECONDS)
+    return _table_page("Live PR Report", "/api/data")
 
 
 @app.route("/nfatat")
 def nfatat_index():
-    html = INDEX_HTML.replace("/api/data", "/nfatat/data").replace(
-        "Live PR Report", "Live NFA TAT Report").replace(
-        "Live SAP PR Report", "Live NFA TAT Report")
-    return render_template_string(html, refresh_seconds=REFRESH_SECONDS)
+    return _table_page("Live NFA TAT Report", "/nfatat/data")
+
+
+@app.route("/nfatat/returned")
+def nfatat_returned():
+    """Focused view: Returned PRs only, key workflow columns."""
+    return _table_page(
+        "Returned PRs - NFA TAT",
+        "/nfatat/data",
+        only_cols=["EPR_No", "PRH_Status", "PRH_Status_Desc", "CP_Team_Date",
+                   "Assignee_Team_Date", "Assignee_Team_Msg", "CP_Team_Msg"],
+        fixed_filters={"PRH_Status_Desc": "Returned"},
+    )
 
 
 @app.route("/api/data")
