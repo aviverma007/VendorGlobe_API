@@ -124,6 +124,43 @@ def _query_sap_local(startdate, enddate, extra_prs):
         conn.close()
 
 
+def _load_odata_pr(startdate, enddate, extra_prs):
+    """PR lines from the live SAP OData table (ODATA_PR, filled by
+    odata_sync once VG_ODATA_ENTITIES includes PR_DATASet). Same
+    window-or-PR-set semantics as the mirror query; values stored as
+    strings ('2026-09-18 00:00:00'), which compare correctly against
+    ISO date strings. Returns [] until the table exists."""
+    try:
+        conn = _connect(PR2PO_DB_NAME)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT * FROM [dbo].[ODATA_PR]")
+        except Exception:  # noqa: BLE001
+            return []
+        cols = [d[0] for d in cur.description]
+        ci = {c.lower(): c for c in cols}
+        lo, hi = startdate, enddate + " 23:59:59"
+        out = []
+        for rec in cur.fetchall():
+            row = {c: (str(v).strip() if v is not None else None)
+                   for c, v in zip(cols, rec)}
+            erdat = row.get(ci.get("erdat", ""), "") or ""
+            banfn = row.get(ci.get("banfn", ""), "") or ""
+            if not banfn:
+                continue
+            if (lo <= erdat[:19] <= hi) or (banfn in extra_prs):
+                slim = {c: row.get(ci.get(c.lower(), "")) for c in SAP_PR_COLS}
+                slim["Banfn"] = banfn
+                slim["SRC"] = "odata"
+                out.append(slim)
+        return out
+    finally:
+        conn.close()
+
+
 def _load_odata_po_headers():
     """PO headers aggregated from the live SAP OData table (ODATA_PO,
     filled by odata_sync). Column names come from SAP as-is, so lookups
@@ -288,6 +325,14 @@ def register(app):
             except Exception as e:  # noqa: BLE001
                 sap_error = str(e)
 
+            # Live SAP OData PRs win over the stale SWDBIDB mirror,
+            # keyed per line (Banfn, Bnfpo); mirror keeps pre-OData history.
+            odata_pr = _load_odata_pr(startdate, enddate, vg_eprs)
+            if odata_pr:
+                live_keys = {(r.get("Banfn"), r.get("Bnfpo")) for r in odata_pr}
+                sap_pr = [r for r in sap_pr
+                          if (r.get("Banfn"), r.get("Bnfpo")) not in live_keys] + odata_pr
+
             epr_set = {r["Banfn"] for r in sap_pr if r.get("Banfn")}
             vg = _query_vg(startdate, enddate, epr_set)
 
@@ -311,6 +356,7 @@ def register(app):
                     "startdate": startdate, "enddate": enddate,
                     "sap_pr_lines": len(sap_pr), "sap_po": len(sap_po_out),
                     "odata_po_headers": len(odata), "banfn_in_odata": banfn_present,
+                    "odata_pr_lines": len(odata_pr),
                     "vg_rows": len(vg), "sap_error": sap_error,
                     "sync": _sync_freshness(),
                 },
