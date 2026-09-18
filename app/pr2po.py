@@ -124,6 +124,76 @@ def _query_sap_local(startdate, enddate, extra_prs):
         conn.close()
 
 
+def _load_odata_po_headers():
+    """PO headers aggregated from the live SAP OData table (ODATA_PO,
+    filled by odata_sync). Column names come from SAP as-is, so lookups
+    are case-insensitive; output uses the same keys as the SAP_PO agg
+    (EBELN, BADAT, ...) plus BANFN when the service provides it and
+    SRC='odata'. Returns {} if the table doesn't exist yet."""
+    try:
+        conn = _connect(PR2PO_DB_NAME)
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT * FROM [dbo].[ODATA_PO]")
+        except Exception:  # noqa: BLE001
+            return {}
+        cols = [d[0] for d in cur.description]
+        ci = {c.lower(): c for c in cols}
+
+        def g(row, name):
+            c = ci.get(name.lower())
+            v = row.get(c) if c else None
+            return str(v).strip() if v is not None else None
+
+        headers = {}
+        for rec in cur.fetchall():
+            row = dict(zip(cols, rec))
+            ebeln = g(row, "Ebeln")
+            if not ebeln:
+                continue
+            h = headers.setdefault(ebeln, {
+                "EBELN": ebeln, "BADAT": None, "AEDAT": None, "FRGZU": None,
+                "FRGKE": None, "PROCSTAT": None, "LOEKZ": None, "NAME1": None,
+                "BSART": None, "EKGRP": None, "EKNAM": None, "PLANT_DESC": None,
+                "TXZ01": None, "NETWR": 0.0, "NETWR_INV": 0.0, "BANFN": None,
+                "SRC": "odata",
+            })
+            badat = g(row, "Badat")
+            if badat and (h["BADAT"] is None or badat < h["BADAT"]):
+                h["BADAT"] = badat
+            aedat = g(row, "Aedat")
+            if aedat and (h["AEDAT"] is None or aedat > h["AEDAT"]):
+                h["AEDAT"] = aedat
+            for out_key, src in (("FRGZU", "Frgzu"), ("FRGKE", "Frgke"),
+                                 ("PROCSTAT", "Procstat"), ("LOEKZ", "Loekz"),
+                                 ("NAME1", "Name1"), ("BSART", "Bsart"),
+                                 ("EKGRP", "Ekgrp"), ("EKNAM", "Eknam"),
+                                 ("PLANT_DESC", "Plant_Desc"), ("TXZ01", "Txz01"),
+                                 ("BANFN", "Banfn")):
+                v = g(row, src)
+                if v:
+                    h[out_key] = v
+            if h["PLANT_DESC"] is None:
+                v = g(row, "PlantDesc") or g(row, "Werks")
+                if v:
+                    h["PLANT_DESC"] = v
+            for out_key, src in (("NETWR", "Netwr"), ("NETWR_INV", "Netwr_Inv")):
+                v = g(row, src)
+                try:
+                    h[out_key] += float(v) if v else 0.0
+                except ValueError:
+                    pass
+        for h in headers.values():
+            h["NETWR"] = f"{h['NETWR']:.2f}"
+            h["NETWR_INV"] = f"{h['NETWR_INV']:.2f}"
+        return headers
+    finally:
+        conn.close()
+
+
 def _query_vg(startdate, enddate, epr_set):
     """VendorGlobe rows from the existing synced table: created in the
     window OR matching a SAP PR from the window (covers replication lag,
@@ -221,15 +291,30 @@ def register(app):
             epr_set = {r["Banfn"] for r in sap_pr if r.get("Banfn")}
             vg = _query_vg(startdate, enddate, epr_set)
 
+            # Merge live SAP OData POs over the (stale) SWDBIDB mirror:
+            # - linked to a fetched PR line via Ebeln, or
+            # - linked to any journey PR via Banfn (fresh POs whose PRs
+            #   are missing from the stale mirror still attach this way).
+            odata = _load_odata_po_headers()
+            linked_ebeln = {r["Ebeln"] for r in sap_pr if r.get("Ebeln")}
+            all_prs = epr_set | vg_eprs | {str(v.get("EPR_No") or "") for v in vg}
+            merged = {p["EBELN"]: p for p in sap_po}
+            for eb, h in odata.items():
+                if eb in linked_ebeln or (h.get("BANFN") and h["BANFN"] in all_prs):
+                    merged[eb] = h  # live SAP wins over the mirror
+            sap_po_out = list(merged.values())
+            banfn_present = any(h.get("BANFN") for h in odata.values())
+
             return jsonify({
                 "ok": True,
                 "meta": {
                     "startdate": startdate, "enddate": enddate,
-                    "sap_pr_lines": len(sap_pr), "sap_po": len(sap_po),
+                    "sap_pr_lines": len(sap_pr), "sap_po": len(sap_po_out),
+                    "odata_po_headers": len(odata), "banfn_in_odata": banfn_present,
                     "vg_rows": len(vg), "sap_error": sap_error,
                     "sync": _sync_freshness(),
                 },
-                "sap_pr": sap_pr, "sap_po": sap_po, "vg": vg,
+                "sap_pr": sap_pr, "sap_po": sap_po_out, "vg": vg,
             })
         except Exception as e:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(e)}), 200
