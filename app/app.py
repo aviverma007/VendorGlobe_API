@@ -39,6 +39,11 @@ except Exception as _e2:
 
 app = Flask(__name__)
 
+# PR -> PO journey endpoints (/pr2po/data, /pr2po/health) for the
+# DASHBOARD_SWD "PR to PO" page.
+import pr2po  # noqa: E402
+pr2po.register(app)
+
 # ── Access log (Werkzeug request lines → access.log, rotating 5 MB × 3) ──
 import logging
 from logging.handlers import RotatingFileHandler as _RFH
