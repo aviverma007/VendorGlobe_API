@@ -93,11 +93,13 @@ def _query_sap_local(startdate, enddate, extra_prs):
             chunk = extra[i:i + 500]
             cur.execute("INSERT INTO #prs (p) VALUES " + ",".join(["(?)"] * len(chunk)), chunk)
 
+        # NOTE: in this extract Erdat is the refresh date; Badat is the
+        # true requisition/creation date - window on Badat.
         cur.execute(
             f"SELECT {col_list} FROM [dbo].[SAP_PR] "
-            f"WHERE ([Erdat] >= ? AND [Erdat] <= ?) "
+            f"WHERE ([Badat] >= ? AND [Badat] <= ?) "
             f"   OR [Banfn] IN (SELECT p FROM #prs) "
-            f"ORDER BY [Erdat] DESC",
+            f"ORDER BY [Badat] DESC",
             startdate, enddate,
         )
         sap_pr = _dict_rows(cur)
@@ -113,7 +115,7 @@ def _query_sap_local(startdate, enddate, extra_prs):
             "  SUM([NETWR]) AS [NETWR], SUM([NETWR_INV]) AS [NETWR_INV] "
             "FROM [dbo].[SAP_PO] "
             "WHERE [EBELN] IN (SELECT DISTINCT [Ebeln] FROM [dbo].[SAP_PR] "
-            "  WHERE (([Erdat] >= ? AND [Erdat] <= ?) OR [Banfn] IN (SELECT p FROM #prs)) "
+            "  WHERE (([Badat] >= ? AND [Badat] <= ?) OR [Banfn] IN (SELECT p FROM #prs)) "
             "  AND [Ebeln] IS NOT NULL AND [Ebeln] <> '') "
             "GROUP BY [EBELN]",
             startdate, enddate,
@@ -147,11 +149,12 @@ def _load_odata_pr(startdate, enddate, extra_prs):
         for rec in cur.fetchall():
             row = {c: (str(v).strip() if v is not None else None)
                    for c, v in zip(cols, rec)}
-            erdat = row.get(ci.get("erdat", ""), "") or ""
+            created = (row.get(ci.get("badat", ""), "")
+                       or row.get(ci.get("erdat", ""), "") or "")
             banfn = row.get(ci.get("banfn", ""), "") or ""
             if not banfn:
                 continue
-            if (lo <= erdat[:19] <= hi) or (banfn in extra_prs):
+            if (lo <= created[:19] <= hi) or (banfn in extra_prs):
                 slim = {c: row.get(ci.get(c.lower(), "")) for c in SAP_PR_COLS}
                 slim["Banfn"] = banfn
                 slim["SRC"] = "odata"
