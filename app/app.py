@@ -37,6 +37,13 @@ except Exception as _e2:
     _NFATAT_WRITER_AVAILABLE = False
     _NFATAT_WRITER_IMPORT_ERROR = _e2
 
+try:
+    import sap_sync
+    _SAP_SYNC_AVAILABLE = True
+except Exception as _e3:
+    _SAP_SYNC_AVAILABLE = False
+    _SAP_SYNC_IMPORT_ERROR = _e3
+
 app = Flask(__name__)
 
 # PR -> PO journey endpoints (/pr2po/data, /pr2po/health) for the
@@ -849,6 +856,15 @@ if __name__ == "__main__":
             print(f"[nfa_tat_writer] Failed to start: {e}")
     else:
         print(f"[nfa_tat_writer] Not available ({_NFATAT_WRITER_IMPORT_ERROR})")
+
+    if _SAP_SYNC_AVAILABLE:
+        try:
+            sap_sync.start_background_thread()
+        except Exception as e:
+            print(f"[sap_sync] Failed to start: {e}")
+            print("[sap_sync] /pr2po endpoints will serve stale/empty SAP tables until fixed.")
+    else:
+        print(f"[sap_sync] Not available ({_SAP_SYNC_IMPORT_ERROR})")
 
     print(f"Serving live PR report on http://localhost:{PORT}")
     try:

@@ -1,23 +1,23 @@
 """
-PR -> PO journey endpoint.
+PR -> PO journey endpoints for the DASHBOARD_SWD "PR to PO" page.
 
-Serves the DASHBOARD_SWD "PR to PO" page with one JSON payload that
-carries all three legs of the journey for a date window:
+Everything is served from LOCAL databases on this server — no request
+ever waits on the SAP BI server or the vendor:
 
-  sap_pr : PRD_PR line rows from SWDBIDB on the SAP BI server
-           (PR created Erdat -> released Frgdt -> follow-on PO Ebeln)
-  sap_po : PRD_PurchaseOrder header rows for the POs those PRs created
-           (created BADAT, release state FRGZU/FRGKE/PROCSTAT)
-  vg     : VendorGlobe QMS PR + NFA rows from our local synced table
-           (per-level approval dates, pending-with, statuses)
+  sap_pr : PR2PO.dbo.SAP_PR   (mirror of SWDBIDB.dbo.PRD_PR,
+           synced every 5 min by sap_sync.py)
+  sap_po : PR2PO.dbo.SAP_PO   (mirror of SWDBIDB.dbo.PRD_PurchaseOrder),
+           aggregated to PO-header level
+  vg     : VendorGlobe_PR.dbo.PRNFATatReportHistory (existing 5-min
+           VendorGlobe sync — QMS PR + NFA approval levels)
 
-The dashboard stitches them client-side by PR number
-(PRD_PR.Banfn == VendorGlobe EPR_No) and PO number
-(PRD_PR.Ebeln == PRD_PurchaseOrder.EBELN).
+The dashboard stitches the legs client-side by PR number
+(SAP_PR.Banfn == VendorGlobe EPR_No) and PO number
+(SAP_PR.Ebeln == SAP_PO.EBELN).
 
-Config (env overrides, VG_ prefix, see db_config):
-  SAP_DB_SERVER (192.168.66.33), SAP_DB_NAME (SWDBIDB),
-  SAP_DB_USER / SAP_DB_PASSWORD -- leave empty for Windows trusted auth.
+Endpoints:
+  GET /pr2po/data?startdate=YYYY-MM-DD&enddate=YYYY-MM-DD
+  GET /pr2po/health   (local DBs + source .33 + sync freshness)
 """
 
 import os
@@ -26,38 +26,20 @@ from datetime import date, timedelta
 from flask import jsonify, request
 
 import db_config as cfg
+import sap_sync
 
 
 def _env(name, default):
     return os.environ.get("VG_" + name, default)
 
 
-SAP_DB_SERVER = _env("SAP_DB_SERVER", "192.168.66.33")
-SAP_DB_NAME = _env("SAP_DB_NAME", "SWDBIDB")
-SAP_DB_USER = _env("SAP_DB_USER", "")
-SAP_DB_PASSWORD = _env("SAP_DB_PASSWORD", "")
-
-
-def _sap_connection_string():
-    base = (
-        f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={SAP_DB_SERVER};"
-        f"DATABASE={SAP_DB_NAME};TrustServerCertificate=yes;"
-    )
-    if SAP_DB_USER:
-        return base + f"UID={SAP_DB_USER};PWD={SAP_DB_PASSWORD};"
-    return base + "Trusted_Connection=yes;"
-
+PR2PO_DB_NAME = _env("PR2PO_DB_NAME", "PR2PO")
 
 # Slim column sets -- keep the payload lean; the page computes the rest.
 SAP_PR_COLS = [
     "Banfn", "Bnfpo", "Erdat", "Badat", "Frgdt", "RelStatus", "Frgkz",
     "Statu", "Loekz", "Ebeln", "Bedat", "Ernam", "Afnam", "Ekgrp",
     "Eknam", "Ekorg", "Werks", "PlantDesc", "Bsart", "Txz01", "Netwr",
-]
-SAP_PO_COLS = [
-    "EBELN", "BADAT", "AEDAT", "FRGZU", "FRGKE", "PROCSTAT", "LOEKZ",
-    "NAME1", "BSART", "EKGRP", "EKNAM", "PLANT_DESC", "NETWR",
-    "NETWR_INV", "TXZ01",
 ]
 VG_COLS = [
     "EPR_No", "Is_Sap_Pr", "Project_Name", "PRH_Category_Name",
@@ -77,7 +59,16 @@ VG_COLS = [
 ]
 
 
-def _rows(cur, cols):
+def _connect(database):
+    import pyodbc
+    return pyodbc.connect(
+        f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
+        f"DATABASE={database};Trusted_Connection=yes;TrustServerCertificate=yes;",
+        timeout=8,
+    )
+
+
+def _dict_rows(cur):
     got = [d[0] for d in cur.description]
     return [
         {c: (str(v).strip() if v is not None else None) for c, v in zip(got, r)}
@@ -85,46 +76,45 @@ def _rows(cur, cols):
     ]
 
 
-def _query_sap(startdate, enddate):
-    import pyodbc
-    conn = pyodbc.connect(_sap_connection_string(), timeout=15)
+def _query_sap_local(startdate, enddate):
+    conn = _connect(PR2PO_DB_NAME)
     try:
         cur = conn.cursor()
         col_list = ", ".join(f"[{c}]" for c in SAP_PR_COLS)
         cur.execute(
-            f"SELECT {col_list} FROM [dbo].[PRD_PR] "
+            f"SELECT {col_list} FROM [dbo].[SAP_PR] "
             f"WHERE [Erdat] >= ? AND [Erdat] <= ? ORDER BY [Erdat] DESC",
             startdate, enddate,
         )
-        sap_pr = _rows(cur, SAP_PR_COLS)
+        sap_pr = _dict_rows(cur)
 
-        po_cols = ", ".join(
-            f"MAX([{c}]) AS [{c}]" if c not in ("EBELN", "NETWR", "NETWR_INV")
-            else (f"[{c}]" if c == "EBELN" else f"SUM([{c}]) AS [{c}]")
-            for c in SAP_PO_COLS
-        )
+        # PO headers for the POs those PR lines created (line -> header agg).
         cur.execute(
-            f"SELECT {po_cols} FROM [dbo].[PRD_PurchaseOrder] "
-            f"WHERE [EBELN] IN (SELECT DISTINCT [Ebeln] FROM [dbo].[PRD_PR] "
-            f"  WHERE [Erdat] >= ? AND [Erdat] <= ? AND [Ebeln] IS NOT NULL AND [Ebeln] <> '') "
-            f"GROUP BY [EBELN]",
+            "SELECT [EBELN], MIN([BADAT]) AS [BADAT], MAX([AEDAT]) AS [AEDAT], "
+            "  MAX([FRGZU]) AS [FRGZU], MAX([FRGKE]) AS [FRGKE], "
+            "  MAX([PROCSTAT]) AS [PROCSTAT], MAX([LOEKZ]) AS [LOEKZ], "
+            "  MAX([NAME1]) AS [NAME1], MAX([BSART]) AS [BSART], "
+            "  MAX([EKGRP]) AS [EKGRP], MAX([EKNAM]) AS [EKNAM], "
+            "  MAX([PLANT_DESC]) AS [PLANT_DESC], MAX([TXZ01]) AS [TXZ01], "
+            "  SUM([NETWR]) AS [NETWR], SUM([NETWR_INV]) AS [NETWR_INV] "
+            "FROM [dbo].[SAP_PO] "
+            "WHERE [EBELN] IN (SELECT DISTINCT [Ebeln] FROM [dbo].[SAP_PR] "
+            "  WHERE [Erdat] >= ? AND [Erdat] <= ? "
+            "  AND [Ebeln] IS NOT NULL AND [Ebeln] <> '') "
+            "GROUP BY [EBELN]",
             startdate, enddate,
         )
-        sap_po = _rows(cur, SAP_PO_COLS)
+        sap_po = _dict_rows(cur)
         return sap_pr, sap_po
     finally:
         conn.close()
 
 
 def _query_vg(startdate, enddate, epr_set):
-    """VendorGlobe rows from our local synced table: created in the window
-    OR matching a SAP PR from the window (covers replication lag)."""
-    import pyodbc
-    conn = pyodbc.connect(
-        f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
-        f"DATABASE={cfg.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes;",
-        timeout=8,
-    )
+    """VendorGlobe rows from the existing synced table: created in the
+    window OR matching a SAP PR from the window (covers replication lag,
+    and VendorGlobe-only PRs that never came from SAP)."""
+    conn = _connect(cfg.DB_NAME)
     try:
         cur = conn.cursor()
         cur.execute(f"SELECT * FROM [dbo].[{cfg.NFATAT_TABLE_NAME}]")
@@ -143,6 +133,27 @@ def _query_vg(startdate, enddate, epr_set):
         conn.close()
 
 
+def _sync_freshness():
+    """Age of the newest fetched_at per mirror table, in seconds."""
+    out = {}
+    try:
+        conn = _connect(PR2PO_DB_NAME)
+        try:
+            cur = conn.cursor()
+            for t in ("SAP_PR", "SAP_PO"):
+                cur.execute(
+                    f"SELECT DATEDIFF(second, MAX(fetched_at), SYSDATETIME()), COUNT(*) "
+                    f"FROM [dbo].[{t}]"
+                )
+                age, n = cur.fetchone()
+                out[t] = {"rows": n, "last_sync_age_s": age}
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)
+    return out
+
+
 def register(app):
     @app.after_request
     def _pr2po_cors(resp):
@@ -155,26 +166,22 @@ def register(app):
 
     @app.route("/pr2po/health")
     def pr2po_health():
-        status = {"vg_db": None, "sap_db": None}
+        import pyodbc
+        status = {"pr2po_db": None, "vg_db": None, "sap_source": None,
+                  "sync": _sync_freshness()}
+        for key, db in (("pr2po_db", PR2PO_DB_NAME), ("vg_db", cfg.DB_NAME)):
+            try:
+                _connect(db).close()
+                status[key] = "ok"
+            except Exception as e:  # noqa: BLE001
+                status[key] = f"error: {e}"
         try:
-            import pyodbc
-            c = pyodbc.connect(_sap_connection_string(), timeout=5)
+            c = pyodbc.connect(sap_sync._sap_connection_string(), timeout=5)
             c.close()
-            status["sap_db"] = "ok"
+            status["sap_source"] = "ok"
         except Exception as e:  # noqa: BLE001
-            status["sap_db"] = f"error: {e}"
-        try:
-            import pyodbc
-            c = pyodbc.connect(
-                f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
-                f"DATABASE={cfg.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes;",
-                timeout=5,
-            )
-            c.close()
-            status["vg_db"] = "ok"
-        except Exception as e:  # noqa: BLE001
-            status["vg_db"] = f"error: {e}"
-        ok = status["vg_db"] == "ok" and status["sap_db"] == "ok"
+            status["sap_source"] = f"error: {e}"
+        ok = status["pr2po_db"] == "ok" and status["vg_db"] == "ok"
         return jsonify({"ok": ok, **status})
 
     @app.route("/pr2po/data")
@@ -188,7 +195,7 @@ def register(app):
             sap_error = None
             sap_pr, sap_po = [], []
             try:
-                sap_pr, sap_po = _query_sap(startdate, enddate)
+                sap_pr, sap_po = _query_sap_local(startdate, enddate)
             except Exception as e:  # noqa: BLE001
                 sap_error = str(e)
 
@@ -201,6 +208,7 @@ def register(app):
                     "startdate": startdate, "enddate": enddate,
                     "sap_pr_lines": len(sap_pr), "sap_po": len(sap_po),
                     "vg_rows": len(vg), "sap_error": sap_error,
+                    "sync": _sync_freshness(),
                 },
                 "sap_pr": sap_pr, "sap_po": sap_po, "vg": vg,
             })
