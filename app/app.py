@@ -44,6 +44,13 @@ except Exception as _e3:
     _SAP_SYNC_AVAILABLE = False
     _SAP_SYNC_IMPORT_ERROR = _e3
 
+try:
+    import odata_sync
+    _ODATA_SYNC_AVAILABLE = True
+except Exception as _e4:
+    _ODATA_SYNC_AVAILABLE = False
+    _ODATA_SYNC_IMPORT_ERROR = _e4
+
 app = Flask(__name__)
 
 # PR -> PO journey endpoints (/pr2po/data, /pr2po/health) for the
@@ -865,6 +872,14 @@ if __name__ == "__main__":
             print("[sap_sync] /pr2po endpoints will serve stale/empty SAP tables until fixed.")
     else:
         print(f"[sap_sync] Not available ({_SAP_SYNC_IMPORT_ERROR})")
+
+    if _ODATA_SYNC_AVAILABLE:
+        try:
+            odata_sync.start_background_thread()
+        except Exception as e:
+            print(f"[odata_sync] Failed to start: {e}")
+    else:
+        print(f"[odata_sync] Not available ({_ODATA_SYNC_IMPORT_ERROR})")
 
     print(f"Serving live PR report on http://localhost:{PORT}")
     try:
