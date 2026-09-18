@@ -76,14 +76,28 @@ def _dict_rows(cur):
     ]
 
 
-def _query_sap_local(startdate, enddate):
+def _query_sap_local(startdate, enddate, extra_prs):
+    """SAP PR lines created in the window OR whose PR number appears in
+    the VendorGlobe window (two-way match: a QMS PR replicated from a
+    SAP PR created before the window still needs its SAP leg + PO link).
+    Then PO headers for every follow-on PO of that PR set."""
     conn = _connect(PR2PO_DB_NAME)
     try:
         cur = conn.cursor()
+        extra = sorted({p for p in extra_prs if p})
         col_list = ", ".join(f"[{c}]" for c in SAP_PR_COLS)
+
+        cur.execute("IF OBJECT_ID('tempdb..#prs') IS NOT NULL DROP TABLE #prs; "
+                    "CREATE TABLE #prs (p varchar(20) PRIMARY KEY);")
+        for i in range(0, len(extra), 500):
+            chunk = extra[i:i + 500]
+            cur.execute("INSERT INTO #prs (p) VALUES " + ",".join(["(?)"] * len(chunk)), chunk)
+
         cur.execute(
             f"SELECT {col_list} FROM [dbo].[SAP_PR] "
-            f"WHERE [Erdat] >= ? AND [Erdat] <= ? ORDER BY [Erdat] DESC",
+            f"WHERE ([Erdat] >= ? AND [Erdat] <= ?) "
+            f"   OR [Banfn] IN (SELECT p FROM #prs) "
+            f"ORDER BY [Erdat] DESC",
             startdate, enddate,
         )
         sap_pr = _dict_rows(cur)
@@ -99,7 +113,7 @@ def _query_sap_local(startdate, enddate):
             "  SUM([NETWR]) AS [NETWR], SUM([NETWR_INV]) AS [NETWR_INV] "
             "FROM [dbo].[SAP_PO] "
             "WHERE [EBELN] IN (SELECT DISTINCT [Ebeln] FROM [dbo].[SAP_PR] "
-            "  WHERE [Erdat] >= ? AND [Erdat] <= ? "
+            "  WHERE (([Erdat] >= ? AND [Erdat] <= ?) OR [Banfn] IN (SELECT p FROM #prs)) "
             "  AND [Ebeln] IS NOT NULL AND [Ebeln] <> '') "
             "GROUP BY [EBELN]",
             startdate, enddate,
@@ -192,10 +206,15 @@ def register(app):
                 date.today() - timedelta(days=90)
             ).isoformat()
 
+            # VendorGlobe first: its window EPRs widen the SAP fetch
+            # (two-way match), then the SAP PR set widens VG in return.
+            vg_window = _query_vg(startdate, enddate, set())
+            vg_eprs = {str(r.get("EPR_No") or "") for r in vg_window}
+
             sap_error = None
             sap_pr, sap_po = [], []
             try:
-                sap_pr, sap_po = _query_sap_local(startdate, enddate)
+                sap_pr, sap_po = _query_sap_local(startdate, enddate, vg_eprs)
             except Exception as e:  # noqa: BLE001
                 sap_error = str(e)
 
