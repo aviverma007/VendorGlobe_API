@@ -158,6 +158,8 @@ def _load_odata_pr(startdate, enddate, extra_prs):
                 slim = {c: row.get(ci.get(c.lower(), "")) for c in SAP_PR_COLS}
                 slim["Banfn"] = banfn
                 slim["SRC"] = "odata"
+                # SAP stopped returning this row -> deleted in SAP (inferred)
+                slim["GONE"] = "1" if row.get(ci.get("missing_since", "")) else "0"
                 out.append(slim)
         return out
     finally:
@@ -199,8 +201,13 @@ def _load_odata_po_headers():
                 "FRGKE": None, "PROCSTAT": None, "LOEKZ": None, "NAME1": None,
                 "BSART": None, "EKGRP": None, "EKNAM": None, "PLANT_DESC": None,
                 "TXZ01": None, "NETWR": 0.0, "NETWR_INV": 0.0, "BANFN": None,
+                "ITEMS_SEEN": 0, "ITEMS_GONE": 0,
                 "SRC": "odata",
             })
+            h["ITEMS_SEEN"] += 1
+            if row.get(ci.get("missing_since", "")):
+                # SAP stopped returning this item -> deleted in SAP (inferred)
+                h["ITEMS_GONE"] += 1
             badat = g(row, "Badat")
             if badat and (h["BADAT"] is None or badat < h["BADAT"]):
                 h["BADAT"] = badat
@@ -229,6 +236,12 @@ def _load_odata_po_headers():
         for h in headers.values():
             h["NETWR"] = f"{h['NETWR']:.2f}"
             h["NETWR_INV"] = f"{h['NETWR_INV']:.2f}"
+            h["ITEMS_SEEN"] = str(h["ITEMS_SEEN"])
+            h["ITEMS_GONE"] = str(h["ITEMS_GONE"])
+            # every item we ever synced has vanished from the SAP feed ->
+            # treat the PO as cancelled (deletion indicator equivalent)
+            if h["ITEMS_GONE"] == h["ITEMS_SEEN"] and h["ITEMS_GONE"] != "0":
+                h["CANCELLED"] = "1"
         return headers
     finally:
         conn.close()

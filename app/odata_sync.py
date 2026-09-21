@@ -119,7 +119,16 @@ def ensure_table(conn, table, keys):
         f"CONSTRAINT [PK_{table}] PRIMARY KEY ({pk}))')", table)
     conn.commit()
     cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?", table)
-    return {r[0] for r in cur.fetchall()}
+    known = {r[0] for r in cur.fetchall()}
+    # presence-tracking metadata (typed): last time SAP returned the row,
+    # and when it first went missing from the feed (deleted-in-SAP signal,
+    # since the entity silently drops deleted items instead of Loekz='X').
+    for meta in ("last_seen", "missing_since"):
+        if meta not in known:
+            cur.execute(f"ALTER TABLE [dbo].[{table}] ADD [{meta}] DATETIME2 NULL")
+            conn.commit()
+            known.add(meta)
+    return known
 
 
 def ensure_columns(conn, table, known, wanted):
@@ -187,7 +196,16 @@ def fetch_window(entity, datefield, start_d, end_d):
 
 # ---------------- upsert ----------------
 
-def upsert(table, keys, raw_rows):
+META_COLS = {"fetched_at", "first_seen", "last_seen", "missing_since"}
+
+
+def upsert(table, keys, raw_rows, mark_missing=False, missing_scope=None):
+    """Insert/update `raw_rows`. Every returned row gets last_seen=now and
+    missing_since=NULL. With mark_missing=True (only when raw_rows covers
+    the FULL synced date range), rows in the table that SAP did not return
+    get missing_since=now - the deleted-in-SAP signal. missing_scope is an
+    optional (datefield, start_iso) tuple limiting the marking to rows the
+    scan actually covered. Returns (ins, upd, same, total, newly_missing)."""
     sanitized = []
     all_cols = set()
     for r in raw_rows:
@@ -208,13 +226,13 @@ def upsert(table, keys, raw_rows):
         if all(key):
             dedup[key] = row
     rows = list(dedup.values())
-    data_cols = sorted(all_cols - set(keys) - {"fetched_at", "first_seen"})
+    data_cols = sorted(all_cols - set(keys) - META_COLS)
 
     with _lock:
         conn = pyodbc.connect(_local_connection_string(), autocommit=False)
         try:
             known = ensure_table(conn, table, keys)
-            ensure_columns(conn, table, known, sorted(all_cols))
+            ensure_columns(conn, table, known, sorted(all_cols - META_COLS))
             cur = conn.cursor()
             key_where = " AND ".join(f"[{k}] = ?" for k in keys)
             col_list = ", ".join(f"[{c}]" for c in (keys + data_cols))
@@ -229,22 +247,50 @@ def upsert(table, keys, raw_rows):
             for key, row in dedup.items():
                 new_vals = {c: (None if row.get(c) is None else str(row.get(c))) for c in data_cols}
                 if key not in existing:
-                    cols = list(keys) + ["fetched_at", "first_seen"] + data_cols
+                    cols = list(keys) + ["fetched_at", "first_seen", "last_seen"] + data_cols
                     ph = ", ".join(["?"] * len(cols))
                     cur.execute(
                         f"INSERT INTO [dbo].[{table}] ({', '.join(f'[{c}]' for c in cols)}) VALUES ({ph})",
-                        list(key) + [now, now] + [new_vals[c] for c in data_cols])
+                        list(key) + [now, now, now] + [new_vals[c] for c in data_cols])
                     ins += 1
                 elif existing[key] != new_vals:
                     set_list = ", ".join(f"[{c}] = ?" for c in data_cols)
                     cur.execute(
-                        f"UPDATE [dbo].[{table}] SET {set_list}, fetched_at = ? WHERE {key_where}",
-                        [new_vals[c] for c in data_cols] + [now] + list(key))
+                        f"UPDATE [dbo].[{table}] SET {set_list}, fetched_at = ?, "
+                        f"last_seen = ?, missing_since = NULL WHERE {key_where}",
+                        [new_vals[c] for c in data_cols] + [now, now] + list(key))
                     upd += 1
                 else:
+                    cur.execute(
+                        f"UPDATE [dbo].[{table}] SET last_seen = ?, missing_since = NULL "
+                        f"WHERE {key_where}", [now] + list(key))
                     same += 1
+            newly_missing = 0
+            if mark_missing and dedup:
+                # rows SAP no longer returns -> deleted in SAP (inferred)
+                cur.execute("CREATE TABLE #seen (" +
+                            ", ".join(f"[{k}] NVARCHAR(100) NOT NULL" for k in keys) + ")")
+                seen = list(dedup.keys())
+                ph_row = "(" + ", ".join(["?"] * len(keys)) + ")"
+                for i in range(0, len(seen), 500):
+                    chunk = seen[i:i + 500]
+                    cur.execute(
+                        f"INSERT INTO #seen VALUES {', '.join([ph_row] * len(chunk))}",
+                        [v for key in chunk for v in key])
+                join = " AND ".join(f"s.[{k}] = t.[{k}]" for k in keys)
+                scope_sql, scope_args = "", []
+                if missing_scope and missing_scope[0] in known:
+                    scope_sql = f" AND t.[{missing_scope[0]}] >= ?"
+                    scope_args = [missing_scope[1]]
+                cur.execute(
+                    f"UPDATE t SET missing_since = ? FROM [dbo].[{table}] t "
+                    f"WHERE t.missing_since IS NULL{scope_sql} AND NOT EXISTS "
+                    f"(SELECT 1 FROM #seen s WHERE {join})",
+                    [now] + scope_args)
+                newly_missing = cur.rowcount
+                cur.execute("DROP TABLE #seen")
             conn.commit()
-            return ins, upd, same, len(rows)
+            return ins, upd, same, len(rows), newly_missing
         finally:
             conn.close()
 
@@ -263,24 +309,34 @@ def _month_windows(start_d, end_d):
 
 
 def sync_once(backfill=False):
+    """One cycle. Data volumes are small, so EVERY cycle re-scans the whole
+    range from BACKFILL_START (month windows): that refreshes changes to
+    old documents (late releases, cancellations) and lets us detect rows
+    SAP stopped returning = deleted in SAP (the entity silently drops
+    deleted items instead of flagging Loekz). Falls back to the rolling
+    window only when no backfill start is configured."""
     results = {}
     today = date.today()
     for ent in _entities():
-        windows = []
-        if backfill and BACKFILL_START:
+        windows, scan_start = [], None
+        if BACKFILL_START:
             try:
-                bstart = date.fromisoformat(BACKFILL_START)
-                windows = list(_month_windows(bstart, today))
+                scan_start = date.fromisoformat(BACKFILL_START)
+                windows = list(_month_windows(scan_start, today))
             except ValueError:
                 windows = []
         if not windows:
-            windows = [(today - timedelta(days=ROLLING_DAYS), today)]
-        tot = [0, 0, 0, 0]
+            scan_start = today - timedelta(days=ROLLING_DAYS)
+            windows = [(scan_start, today)]
+        rows = []
         for w0, w1 in windows:
-            rows = fetch_window(ent["entity"], ent["datefield"], w0, w1)
-            r = upsert(ent["table"], ent["keys"], rows)
-            tot = [a + b for a, b in zip(tot, r)]
-        results[ent["table"]] = tuple(tot)
+            rows.extend(fetch_window(ent["entity"], ent["datefield"], w0, w1))
+        # mark_missing only when the fetch worked (rows came back) - a SAP
+        # hiccup returning nothing must not flag the whole table deleted
+        results[ent["table"]] = upsert(
+            ent["table"], ent["keys"], rows,
+            mark_missing=bool(rows),
+            missing_scope=(_sanitize(ent["datefield"]), scan_start.isoformat()))
     return results
 
 
@@ -298,10 +354,12 @@ def run_forever(interval_seconds=None):
         try:
             results = sync_once(backfill=not _backfill_done)
             _backfill_done = True
-            changed = {t: r for t, r in results.items() if r[0] or r[1]}
+            changed = {t: r for t, r in results.items() if r[0] or r[1] or r[4]}
             if changed:
-                msg = " · ".join(f"{t}: +{r[0]} new, ~{r[1]} updated of {r[3]}"
-                                 for t, r in changed.items())
+                msg = " · ".join(
+                    f"{t}: +{r[0]} new, ~{r[1]} updated of {r[3]}"
+                    + (f", {r[4]} gone-from-SAP" if r[4] else "")
+                    for t, r in changed.items())
                 print(f"[odata_sync] {datetime.now().strftime('%H:%M:%S')} {msg}")
         except requests.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
