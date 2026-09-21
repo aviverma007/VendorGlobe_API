@@ -364,6 +364,16 @@ def nfatat_index():
     return _table_page("Live NFA TAT Report", "/db/nfatat")
 
 
+@app.route("/sappr")
+def sappr_index():
+    return _table_page("Live SAP PR Report", "/db/sappr")
+
+
+@app.route("/sappo")
+def sappo_index():
+    return _table_page("Live SAP PO Report", "/db/sappo")
+
+
 @app.route("/nfatat/returned")
 def nfatat_returned():
     """Focused view: Returned PRs only, key workflow columns."""
@@ -396,6 +406,48 @@ def _db_rows(table_name):
         ]
     finally:
         conn.close()
+
+
+def _pr2po_rows(table_name, order_col="fetched_at"):
+    """All rows from a PR2PO (live SAP feed) table as dicts."""
+    import pyodbc
+    conn = pyodbc.connect(
+        f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
+        f"DATABASE=PR2PO;Trusted_Connection=yes;TrustServerCertificate=yes;",
+        timeout=8,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM [dbo].[{table_name}] ORDER BY [{order_col}] DESC")
+        cols = [d[0] for d in cur.description]
+        hidden = {"fetched_at", "first_seen", "last_seen"}
+        return [
+            {c: (str(v) if v is not None else None)
+             for c, v in zip(cols, row) if c not in hidden}
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+@app.route("/db/sappr")
+def db_sappr():
+    """Live SAP PR lines (ODATA_PR, synced every 5 min from SAP OData)."""
+    try:
+        rows = _pr2po_rows("ODATA_PR")
+        return jsonify({"ok": True, "rows": rows, "count": len(rows), "source": "odata"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
+@app.route("/db/sappo")
+def db_sappo():
+    """Live SAP PO lines (ODATA_PO, synced every 5 min from SAP OData)."""
+    try:
+        rows = _pr2po_rows("ODATA_PO")
+        return jsonify({"ok": True, "rows": rows, "count": len(rows), "source": "odata"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 @app.route("/db/pr")
