@@ -273,6 +273,57 @@ def _query_vg(startdate, enddate, epr_set):
             if (lo <= created <= hi) or (epr in epr_set):
                 out.append({c: (str(d[c]).strip() if d.get(c) is not None else None)
                             for c in VG_COLS if c in d})
+        # The NFA TAT report does not contain every QMS PR (e.g. PRs the
+        # report's own criteria exclude), while the plain PR report
+        # (PRReportHistory, one row per PR_No) has them all. Fall back to
+        # it for any QMS PR the NFA table missed, mapping what fields it
+        # has - existence alone proves "QMS PR Created".
+        have = {str(r.get("EPR_No") or "") for r in out}
+        try:
+            cur.execute(f"SELECT * FROM [dbo].[{cfg.TABLE_NAME}]")
+            pcols = [dsc[0] for dsc in cur.description]
+            ci = {c.lower(): c for c in pcols}
+
+            def g(d, *names):
+                for n in names:
+                    c = ci.get(n.lower())
+                    if c is not None and d.get(c) is not None:
+                        s = str(d[c]).strip()
+                        if s and s.upper() not in ("NA", "NONE", "NULL"):
+                            return s
+                return None
+
+            for r in cur.fetchall():
+                d = dict(zip(pcols, r))
+                epr = g(d, "PR_No", "EPR_No") or ""
+                if not epr or epr in have:
+                    continue
+                created = g(d, "PR_Created_Date", "Created_Date", "PR_Date") or ""
+                if not ((lo <= created[:19] <= hi) or (epr in epr_set)):
+                    continue
+                row = {c: None for c in VG_COLS}
+                row.update({
+                    "EPR_No": epr,
+                    "Is_Sap_Pr": g(d, "Is_Sap_Pr") or "1",
+                    "PR_Created_Date": created or None,
+                    "PRH_Status_Desc": g(d, "PRH_Status_Desc", "PR_Status_Desc", "Status_Desc", "PR_Status", "Status"),
+                    "PR_Pending_With": g(d, "PR_Pending_With", "Pending_With"),
+                    "PR_Pending_Since": g(d, "PR_Pending_Since", "Pending_Since"),
+                    "Project_Name": g(d, "Project_Name", "Project"),
+                    "PRH_Category_Name": g(d, "PRH_Category_Name", "Category_Name", "Category"),
+                    "Scope": g(d, "Scope", "PR_Description", "Description", "Short_Text"),
+                    "PR_Budget": g(d, "PR_Budget", "Budget"),
+                    "Amount_Including_Tax": g(d, "Amount_Including_Tax", "Amount", "PR_Amount"),
+                    "Vendor_Name": g(d, "Vendor_Name", "Vendor"),
+                    "NFA_No": g(d, "NFA_No"),
+                    "NFA_Created_Date": g(d, "NFA_Created_Date"),
+                    "NFA_Status_Desc": g(d, "NFA_Status_Desc"),
+                    "NFA_Pending_With": g(d, "NFA_Pending_With"),
+                })
+                row["VG_SRC"] = "pr_report"
+                out.append(row)
+        except Exception:  # noqa: BLE001  (fallback table optional)
+            pass
         return out
     finally:
         conn.close()
