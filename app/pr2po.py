@@ -200,7 +200,7 @@ def _load_odata_po_headers():
                 "EBELN": ebeln, "BADAT": None, "AEDAT": None, "FRGZU": None,
                 "FRGKE": None, "PROCSTAT": None, "LOEKZ": None, "NAME1": None,
                 "BSART": None, "EKGRP": None, "EKNAM": None, "PLANT_DESC": None,
-                "TXZ01": None, "NETWR": 0.0, "NETWR_INV": 0.0, "BANFN": None,
+                "TXZ01": None, "NETWR": [], "NETWR_INV": [], "BANFN": None,
                 "ITEMS_SEEN": 0, "ITEMS_GONE": 0,
                 "SRC": "odata",
             })
@@ -228,14 +228,22 @@ def _load_odata_po_headers():
                 if v:
                     h["PLANT_DESC"] = v
             for out_key, src in (("NETWR", "Netwr"), ("NETWR_INV", "Netwr_Inv")):
-                v = g(row, src)
+                v = g(row, src) or g(row, "NetwrInv" if out_key == "NETWR_INV" else src)
                 try:
-                    h[out_key] += float(v) if v else 0.0
+                    h[out_key].append(float(v) if v else 0.0)
                 except ValueError:
                     pass
         for h in headers.values():
-            h["NETWR"] = f"{h['NETWR']:.2f}"
-            h["NETWR_INV"] = f"{h['NETWR_INV']:.2f}"
+            # The entity duplicates PO-level totals onto every item row
+            # (all rows identical Netwr = the PO total), so summing inflates
+            # values by the item count. All-identical values -> take one;
+            # genuinely per-item values -> sum.
+            for k in ("NETWR", "NETWR_INV"):
+                vals = h[k]
+                if len(set(vals)) == 1 and len(vals) > 1:
+                    h[k] = f"{vals[0]:.2f}"
+                else:
+                    h[k] = f"{sum(vals):.2f}"
             h["ITEMS_SEEN"] = str(h["ITEMS_SEEN"])
             h["ITEMS_GONE"] = str(h["ITEMS_GONE"])
             # every item we ever synced has vanished from the SAP feed ->
