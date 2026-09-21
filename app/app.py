@@ -158,6 +158,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <h1>{{ title }}</h1>
   <input type="text" id="globalFilter" placeholder="Filter all columns...">
   <div class="right">
+    <select id="rowLimit" onchange="setLimit(this.value)">
+      <option value="100">Show 100</option>
+      <option value="500">Show 500</option>
+      <option value="1000">Show 1000</option>
+      <option value="2000">Show 2000</option>
+      <option value="all">Show all</option>
+    </select>
     <select id="dlScope">
       <option value="filtered">Download: filtered rows</option>
       <option value="latest100">Download: latest 100</option>
@@ -181,11 +188,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <tbody id="tbody"></tbody>
   </table>
 </div>
+<div id="moreBar" style="display:none; padding:10px 16px; background:#f1f5f9; border-top:1px solid #e2e8f0; text-align:center;">
+  <span id="moreInfo" style="margin-right:12px; color:#475569; font-size:13px; font-weight:600;"></span>
+  <button onclick="showMore(100)" style="margin-right:8px;">Show next 100</button>
+  <button onclick="showMore(500)">Show next 500</button>
+</div>
 <script>
 const DATA_URL = "{{ data_url }}";
 const ONLY_COLS = {{ only_cols | tojson }};
 const FIXED_FILTERS = {{ fixed_filters | tojson }};
 let rawRows = [], columns = [], colFilters = {}, rangeFilters = {}, sortCol = null, sortDir = 1, numericCols = {};
+let showLimit = 100;  // rows rendered; filters/sort/Excel always use ALL rows
+
+function setLimit(v){ showLimit = v==='all' ? Infinity : parseInt(v,10); render(); }
+function showMore(n){ showLimit = (showLimit===Infinity?0:showLimit) + n; render(); }
 
 function isNumericLike(v){ if(v===null||v===undefined||v==='')return false; const t=String(v).replace(/,/g,'').replace(/\s*Lacs?\s*$/i,''); return t!=='' && !isNaN(t); }
 function numVal(v){ return parseFloat(String(v).replace(/,/g,'').replace(/\s*Lacs?\s*$/i,'')); }
@@ -262,15 +278,19 @@ function filteredRows(){
 
 function render(){
   const rows=filteredRows();
+  const shown=rows.slice(0, showLimit===Infinity?rows.length:showLimit);
   const tb=document.getElementById('tbody'); tb.innerHTML='';
   const frag=document.createDocumentFragment();
-  for(const r of rows){
+  for(const r of shown){
     const tr=document.createElement('tr');
     for(const c of columns){ const td=document.createElement('td'); const v=r[c]; td.textContent=(v===null||v===undefined)?'':v; td.title=td.textContent; tr.appendChild(td); }
     frag.appendChild(tr);
   }
   tb.appendChild(frag);
-  document.getElementById('rowCount').textContent = rows.length+' of '+rawRows.length+' rows';
+  document.getElementById('rowCount').textContent = 'showing '+shown.length+' of '+rows.length+' filtered ('+rawRows.length+' total)';
+  const more=rows.length-shown.length;
+  document.getElementById('moreBar').style.display = more>0 ? '' : 'none';
+  document.getElementById('moreInfo').textContent = more+' more row'+(more===1?'':'s')+' not shown';
   document.getElementById('topSpacer').style.width=document.getElementById('tableWrap').scrollWidth+'px';
 }
 
