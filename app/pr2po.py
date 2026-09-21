@@ -94,13 +94,20 @@ def _query_sap_local(startdate, enddate, extra_prs):
             cur.execute("INSERT INTO #prs (p) VALUES " + ",".join(["(?)"] * len(chunk)), chunk)
 
         # NOTE: in this extract Erdat is the refresh date; Badat is the
-        # true requisition/creation date - window on Badat.
+        # true requisition/creation date - window on Badat. A PR also
+        # belongs to the window when its follow-on PO was created or
+        # changed (approved) inside it - an old PR whose PO got released
+        # this month is current activity, not history.
         cur.execute(
             f"SELECT {col_list} FROM [dbo].[SAP_PR] "
             f"WHERE ([Badat] >= ? AND [Badat] <= ?) "
             f"   OR [Banfn] IN (SELECT p FROM #prs) "
+            f"   OR ([Ebeln] IS NOT NULL AND [Ebeln] <> '' AND [Ebeln] IN ("
+            f"        SELECT [EBELN] FROM [dbo].[SAP_PO] "
+            f"        WHERE ([BADAT] >= ? AND [BADAT] <= ?) "
+            f"           OR ([AEDAT] >= ? AND [AEDAT] <= ?))) "
             f"ORDER BY [Badat] DESC",
-            startdate, enddate,
+            startdate, enddate, startdate, enddate, startdate, enddate,
         )
         sap_pr = _dict_rows(cur)
 
@@ -117,8 +124,10 @@ def _query_sap_local(startdate, enddate, extra_prs):
             "WHERE [EBELN] IN (SELECT DISTINCT [Ebeln] FROM [dbo].[SAP_PR] "
             "  WHERE (([Badat] >= ? AND [Badat] <= ?) OR [Banfn] IN (SELECT p FROM #prs)) "
             "  AND [Ebeln] IS NOT NULL AND [Ebeln] <> '') "
+            "   OR ([BADAT] >= ? AND [BADAT] <= ?) "
+            "   OR ([AEDAT] >= ? AND [AEDAT] <= ?) "
             "GROUP BY [EBELN]",
-            startdate, enddate,
+            startdate, enddate, startdate, enddate, startdate, enddate,
         )
         sap_po = _dict_rows(cur)
         return sap_pr, sap_po
