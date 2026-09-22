@@ -200,6 +200,27 @@ const FIXED_FILTERS = {{ fixed_filters | tojson }};
 let rawRows = [], columns = [], colFilters = {}, rangeFilters = {}, sortCol = null, sortDir = 1, numericCols = {};
 let showLimit = 100;  // rows rendered; filters/sort/Excel always use ALL rows
 
+// SAP technical names -> user-friendly headers (hover shows the original)
+const FRIENDLY = {
+  Banfn:'PR No.', Bnfpo:'PR Item', Badat:'PR Date', Erdat:'Refresh Date',
+  Frgdt:'Delivery Date', Frgkz:'Release Indicator', Frgzu:'Release Status',
+  Frgst:'Release Strategy', Frggr:'Release Group', RelStatus:'Release Status',
+  Statu:'Processing Status', Loekz:'Deleted', Ernam:'Created By',
+  Afnam:'Requested By', Ekgrp:'Purch. Group', Eknam:'Department',
+  Ekorg:'Purch. Org', Werks:'Plant Code', PlantDesc:'Plant / Project',
+  Plant_Desc:'Plant / Project', Bsart:'Document Type', Txz01:'Description',
+  Matnr:'Material Code', Matkl:'Material Group', Menge:'Quantity',
+  Meins:'Unit', Netpr:'Unit Price', Netwr:'Value', Waers:'Currency',
+  Ebeln:'PO No.', Ebelp:'PO Item', Bedat:'PO Date', Bednr:'Tracking No.',
+  Aedat:'Changed On', Monat:'Period', Gjahr:'Fiscal Year',
+  Kdatb:'Validity Start', Kdate:'Validity End', Procstat:'Proc. State',
+  Knttp:'Acct. Assignment', Pstyp:'Item Category', Lgort:'Storage Loc.',
+  Lphis:'Release Docu.', Name1:'Vendor', MengeDel:'Qty Delivered',
+  MengeInv:'Qty Invoiced', NetwrInv:'Value Invoiced',
+  missing_since:'Gone From SAP Since',
+};
+const label = c => FRIENDLY[c] || c;
+
 function setLimit(v){ showLimit = v==='all' ? Infinity : parseInt(v,10); render(); }
 function showMore(n){ showLimit = (showLimit===Infinity?0:showLimit) + n; render(); }
 
@@ -216,7 +237,13 @@ async function load(){
     for(const [k,v] of Object.entries(FIXED_FILTERS)) rows = rows.filter(r => String(r[k]??'').trim().toLowerCase() === v.toLowerCase());
     rawRows = rows;
     if(rows.length){
-      columns = ONLY_COLS.length ? ONLY_COLS.filter(c=>c in rows[0]) : Object.keys(rows[0]).sort();
+      const PREF=['PR_No','EPR_No','Banfn','Bnfpo','Badat','Ebeln','Ebelp','Bedat','Txz01','Name1','Netwr','Waers','Menge','Meins','Netpr','Frgkz','Frgzu','Frgke','Statu','Procstat','Loekz','PlantDesc','Plant_Desc','Werks','Eknam','Ekgrp','Afnam','Ernam','Aedat'];
+      columns = ONLY_COLS.length ? ONLY_COLS.filter(c=>c in rows[0])
+        : Object.keys(rows[0]).sort((a,b)=>{
+            const ia=PREF.indexOf(a), ib=PREF.indexOf(b);
+            if(ia!==-1||ib!==-1) return (ia===-1?999:ia)-(ib===-1?999:ib);
+            return a.localeCompare(b);
+          });
       // detect numeric / date columns from a sample
       numericCols = {};
       for(const c of columns){
@@ -236,7 +263,7 @@ function buildHeader(){
   if(hr.children.length===columns.length) return;
   hr.innerHTML=''; fr.innerHTML='';
   for(const c of columns){
-    const th=document.createElement('th'); th.textContent=c;
+    const th=document.createElement('th'); th.textContent=label(c); th.title=c;
     th.onclick=()=>{ if(sortCol===c)sortDir*=-1; else {sortCol=c;sortDir=1;} render(); };
     hr.appendChild(th);
     const fth=document.createElement('th');
@@ -305,7 +332,7 @@ function downloadExcel(){
   let rows = scope==='all' ? rawRows : filteredRows();
   if(scope==='latest100') rows = rows.slice(0,100);
   const esc=v=>{ v=(v===null||v===undefined)?'':String(v); return '"'+v.replace(/"/g,'""')+'"'; };
-  let csv='\uFEFF'+columns.map(esc).join(',')+'\n';
+  let csv='\uFEFF'+columns.map(c=>esc(label(c))).join(',')+'\n';
   for(const r of rows) csv+=columns.map(c=>esc(r[c])).join(',')+'\n';
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
