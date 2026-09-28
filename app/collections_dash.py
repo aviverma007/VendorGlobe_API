@@ -23,7 +23,7 @@ import datetime
 import threading
 
 import openpyxl
-from flask import jsonify
+from flask import jsonify, request
 
 COLLECTION_DIR = os.environ.get(
     "VG_COLLECTION_DIR",
@@ -264,6 +264,15 @@ def _load(kind):
 
 
 def register(app):
+    @app.after_request
+    def _collections_cors(resp):
+        # The DASHBOARD_SWD SPA (port 3000) fetches these endpoints
+        # cross-origin; data is read-only and already on the intranet.
+        if request.path.startswith("/collections"):
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
+
     @app.route("/collections/data")
     def collections_data():
         try:
