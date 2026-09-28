@@ -122,6 +122,7 @@ def _rows_ledger(ws):
                 "recPct": _num(r[24]),
                 "letter": _clean(r[25]), "letterDate": _iso(r[26]), "letterDue": _iso(r[27]),
                 "rm": _clean(r[28]) or _clean(r[29]),
+                "rmFinal": _clean(r[29]) or _clean(r[28]),
                 "remarks": (_clean(r[30]) or "")[:220] or None,
                 "rmStatus": _clean(r[31]),
                 "statusV": _clean(r[32]) if len(r) > 32 else None,
