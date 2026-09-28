@@ -81,6 +81,8 @@ def _norm_proj(p):
     s = (_clean(p) or "").upper()
     s = " ".join(s.split())
     s = s.replace(" - ", "-").replace(" -", "-").replace("- ", "-")
+    if s.startswith("ONE "):        # Daily sheets say "One DXP-2", targets say "DXP-2"
+        s = s[4:]
     return s
 
 
