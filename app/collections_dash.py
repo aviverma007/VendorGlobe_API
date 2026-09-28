@@ -4,10 +4,12 @@ straight from the shared folder, no database needed.
 Folder (override with VG_COLLECTION_DIR):
     \\\\WIN-PJQA0USC6HT\\Users\\anirudh.verma\\Downloads\\CRM\\CRM DATA REPORTS\\CRM\\COLLECTION
 Files (fixed names; falls back to the newest file matching the prefix,
-so dated names like "PTP month of Sep-26.xlsx" also work):
-    Collection Master.xlsx   -> PDC sheet (post-dated cheques in hand)
-    Daily Collection Report.xlsx -> one receipts sheet per project
-    PTP.xlsx                 -> Sheet1, the full per-unit customer ledger
+so dated names also work):
+    Collection Master.xlsx   -> "Master." sheet (per-unit ledger: TCV,
+                                Demanded, Recd., Net Due — the team's own
+                                numbers) + PDC sheet (post-dated cheques)
+    Daily Collection Report.xlsx -> one receipts sheet per project +
+                                'Fina l-2 ' RM/project monthly targets
 
 The endpoint caches each parsed file keyed by its modified-time: the
 team saves the Excel, the next dashboard load re-reads only what
@@ -32,7 +34,6 @@ COLLECTION_DIR = os.environ.get(
 FILES = {
     "master": ("Collection Master.xlsx", "Collection Master*"),
     "daily": ("Daily Collection Report.xlsx", "Daily Collection*"),
-    "ptp": ("PTP.xlsx", "PTP*"),
 }
 # Daily workbook: sheets that are pivots/rosters, not receipt logs
 DAILY_SKIP = {"summary", "rm sheet", "final", "fina l-2", "aug - aop sheet", "m3m",
@@ -104,10 +105,7 @@ def _open_copy(path):
         raise
 
 
-def _parse_ptp(path):
-    wb, tmp = _open_copy(path)
-    try:
-        ws = wb["Sheet1"]
+def _rows_ledger(ws):
         rows = ws.iter_rows(values_only=True)
         next(rows)  # header
         out = []
@@ -131,13 +129,9 @@ def _parse_ptp(path):
                 "funding": _clean(r[34]), "bank": _clean(r[35]),
                 "sanctDate": _iso(r[36]), "sanctAmt": _num(r[38]),
                 "bba": _clean(r[39]), "bbaDate": _iso(r[40]),
-                "ptpDate": _iso(r[45]),
                 "possession": _clean(r[47]) if len(r) > 47 else None,
             })
         return out
-    finally:
-        wb.close()
-        os.unlink(tmp)
 
 
 def _parse_targets(wb):
@@ -220,6 +214,8 @@ def _parse_daily(path):
 def _parse_master(path):
     wb, tmp = _open_copy(path)
     try:
+        led_ws = next((wb[n] for n in wb.sheetnames if n.strip().rstrip(".").lower() == "master"), None)
+        ledger = _rows_ledger(led_ws) if led_ws is not None else []
         out = []
         if "PDC" in wb.sheetnames:
             ws = wb["PDC"]
@@ -239,13 +235,13 @@ def _parse_master(path):
                     "allotDate": _iso(r[10]), "phase": _clean(r[11]),
                     "tower": _clean(r[12]), "received": _iso(r[13]),
                 })
-        return out
+        return {"ledger": ledger, "pdc": out}
     finally:
         wb.close()
         os.unlink(tmp)
 
 
-PARSERS = {"ptp": _parse_ptp, "daily": _parse_daily, "master": _parse_master}
+PARSERS = {"daily": _parse_daily, "master": _parse_master}
 
 
 def _load(kind):
@@ -276,12 +272,13 @@ def register(app):
     @app.route("/collections/data")
     def collections_data():
         try:
-            ledger, m1, e1 = _load("ptp")
             daily, m2, e2 = _load("daily")
-            pdc, m3, e3 = _load("master")
+            master, m3, e3 = _load("master")
+            ledger = (master or {}).get("ledger", [])
+            pdc = (master or {}).get("pdc", [])
             receipts = (daily or {}).get("receipts", [])
             targets = (daily or {}).get("targets", [])
-            errors = [e for e in (e1, e2, e3) if e]
+            errors = [e for e in (e2, e3) if e]
 
             def pack(rows):
                 if not rows:
@@ -292,7 +289,6 @@ def register(app):
             return jsonify({
                 "ok": True,
                 "asOf": {
-                    "ptp": datetime.datetime.fromtimestamp(m1).isoformat() if m1 else None,
                     "daily": datetime.datetime.fromtimestamp(m2).isoformat() if m2 else None,
                     "master": datetime.datetime.fromtimestamp(m3).isoformat() if m3 else None,
                 },
