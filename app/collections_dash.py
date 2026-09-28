@@ -7,7 +7,8 @@ Files (fixed names; falls back to the newest file matching the prefix,
 so dated names also work):
     Collection Master.xlsx   -> "Master." sheet (per-unit ledger: TCV,
                                 Demanded, Recd., Net Due — the team's own
-                                numbers) + PDC sheet (post-dated cheques)
+                                numbers) + "Inventory" pivot (Done/Pending
+                                allotment counts with money, in Cr)
     Daily Collection Report.xlsx -> one receipts sheet per project +
                                 'Fina l-2 ' RM/project monthly targets
 
@@ -212,31 +213,47 @@ def _parse_daily(path):
         os.unlink(tmp)
 
 
+def _parse_allot(wb, ledger):
+    """The 'Inventory' pivot: project rows with phase sub-rows, Done /
+    Pending / Grand Total unit counts and money columns already in Cr.
+    Phase vs project is resolved against the ledger's own structure
+    (a label that is a phase of the current project indents under it;
+    a repeat, or any other project name, starts a new project)."""
+    if "Inventory" not in wb.sheetnames:
+        return []
+    projset, phases = set(), {}
+    for l in ledger:
+        projset.add(l["proj"])
+        if l["phase"]:
+            phases.setdefault(l["proj"], set()).add(_norm_proj(l["phase"]))
+    out, cur, used = [], None, set()
+    for r in wb["Inventory"].iter_rows(values_only=True):
+        lab = _clean(r[0]) if r else None
+        if not lab or lab in ("Row Labels",) or lab.startswith("Allotment") or lab.startswith("Count of"):
+            continue
+        row = {"label": lab, "done": int(_num(r[1])), "pending": int(_num(r[2])),
+               "total": int(_num(r[3])), "tcv": _num(r[4]), "called": _num(r[5]),
+               "recd": _num(r[6]), "due": _num(r[7]), "fut": _num(r[8])}
+        n = _norm_proj(lab)
+        if n == "GRAND TOTAL":
+            out.append({**row, "kind": "total", "proj": None})
+            break
+        is_phase = cur is not None and n in phases.get(cur, set()) and n not in used
+        if is_phase:
+            used.add(n)
+            out.append({**row, "kind": "phase", "proj": cur})
+        else:
+            cur, used = n, set()
+            out.append({**row, "kind": "proj", "proj": n})
+    return out
+
+
 def _parse_master(path):
     wb, tmp = _open_copy(path)
     try:
         led_ws = next((wb[n] for n in wb.sheetnames if n.strip().rstrip(".").lower() == "master"), None)
         ledger = _rows_ledger(led_ws) if led_ws is not None else []
-        out = []
-        if "PDC" in wb.sheetnames:
-            ws = wb["PDC"]
-            rows = ws.iter_rows(values_only=True)
-            next(rows, None)          # blank/ratio row
-            next(rows, None)          # header row
-            for r in rows:
-                if len(r) < 10:
-                    continue
-                amt = _num(r[9])
-                if amt == 0 or not _clean(r[2]):
-                    continue
-                out.append({
-                    "proj": _norm_proj(r[1]), "reg": _clean(r[2]), "given": _iso(r[3]),
-                    "unit": _clean(r[4]), "mode": _clean(r[5]), "chq": _clean(r[6]),
-                    "chqDate": _iso(r[7]), "bank": _clean(r[8]), "amt": amt,
-                    "allotDate": _iso(r[10]), "phase": _clean(r[11]),
-                    "tower": _clean(r[12]), "received": _iso(r[13]),
-                })
-        return {"ledger": ledger, "pdc": out}
+        return {"ledger": ledger, "allot": _parse_allot(wb, ledger)}
     finally:
         wb.close()
         os.unlink(tmp)
@@ -276,7 +293,7 @@ def register(app):
             daily, m2, e2 = _load("daily")
             master, m3, e3 = _load("master")
             ledger = (master or {}).get("ledger", [])
-            pdc = (master or {}).get("pdc", [])
+            allot = (master or {}).get("allot", [])
             receipts = (daily or {}).get("receipts", [])
             targets = (daily or {}).get("targets", [])
             errors = [e for e in (e2, e3) if e]
@@ -297,7 +314,7 @@ def register(app):
                 "ledger": pack(ledger),
                 "receipts": pack(receipts),
                 "targets": pack(targets),
-                "pdc": pack(pdc),
+                "allot": pack(allot),
             })
         except Exception as exc:            # noqa: BLE001 — surface to the dashboard
             return jsonify({"ok": False, "error": str(exc)}), 500
