@@ -126,6 +126,8 @@ def _parse_ptp(path):
                 "rm": _clean(r[28]) or _clean(r[29]),
                 "remarks": (_clean(r[30]) or "")[:220] or None,
                 "rmStatus": _clean(r[31]),
+                "statusV": _clean(r[32]) if len(r) > 32 else None,
+                "benefit": _num(r[22]),
                 "funding": _clean(r[34]), "bank": _clean(r[35]),
                 "sanctDate": _iso(r[36]), "sanctAmt": _num(r[38]),
                 "bba": _clean(r[39]), "bbaDate": _iso(r[40]),
@@ -136,6 +138,48 @@ def _parse_ptp(path):
     finally:
         wb.close()
         os.unlink(tmp)
+
+
+def _parse_targets(wb):
+    """RM x project targets from 'Fina l-2 ' (TGT/RECD/BLNC triplets, in Cr);
+    falls back to 'Final' (targets only)."""
+    name3 = next((n for n in wb.sheetnames if n.strip().lower().startswith("fina l-2")), None)
+    out = []
+    if name3:
+        rows = list(wb[name3].iter_rows(values_only=True))
+        if len(rows) > 3:
+            projs = rows[1]
+            cols = [(i, _norm_proj(projs[i])) for i in range(3, len(projs)) if _clean(projs[i])]
+            for r in rows[3:]:
+                rm = _clean(r[2]) if len(r) > 2 else None
+                if not rm or rm.lower() in ("total", "rm name"):
+                    continue
+                for ci, pj in cols:
+                    if pj.startswith("GRAND") or "ACHIEV" in pj or "%" in pj:
+                        continue
+                    tgt = _num(r[ci]) if len(r) > ci else 0.0
+                    recd = _num(r[ci + 1]) if len(r) > ci + 1 else 0.0
+                    if tgt == 0 and recd == 0:
+                        continue
+                    out.append({"rm": rm, "proj": pj, "tgt": round(tgt, 4), "recd": round(recd, 4)})
+        if out:
+            return out
+    if "Final" in wb.sheetnames:
+        rows = list(wb["Final"].iter_rows(values_only=True))
+        if len(rows) > 3:
+            projs = rows[2]
+            for r in rows[3:]:
+                rm = _clean(r[2]) if len(r) > 2 else None
+                if not rm or rm.lower() in ("total",):
+                    continue
+                for i in range(3, len(projs)):
+                    pj = _norm_proj(projs[i])
+                    if not pj or pj.startswith("GRAND"):
+                        continue
+                    tgt = _num(r[i]) if len(r) > i else 0.0
+                    if tgt:
+                        out.append({"rm": rm, "proj": pj, "tgt": round(tgt, 4), "recd": 0.0})
+    return out
 
 
 def _parse_daily(path):
@@ -167,7 +211,7 @@ def _parse_daily(path):
                     "milestone": _clean(r[15]) if len(r) > 15 else None,
                     "dueDate": _iso(r[16]) if len(r) > 16 else None,
                 })
-        return out
+        return {"receipts": out, "targets": _parse_targets(wb)}
     finally:
         wb.close()
         os.unlink(tmp)
@@ -224,8 +268,10 @@ def register(app):
     def collections_data():
         try:
             ledger, m1, e1 = _load("ptp")
-            receipts, m2, e2 = _load("daily")
+            daily, m2, e2 = _load("daily")
             pdc, m3, e3 = _load("master")
+            receipts = (daily or {}).get("receipts", [])
+            targets = (daily or {}).get("targets", [])
             errors = [e for e in (e1, e2, e3) if e]
 
             def pack(rows):
@@ -244,6 +290,7 @@ def register(app):
                 "errors": errors,
                 "ledger": pack(ledger),
                 "receipts": pack(receipts),
+                "targets": pack(targets),
                 "pdc": pack(pdc),
             })
         except Exception as exc:            # noqa: BLE001 — surface to the dashboard
