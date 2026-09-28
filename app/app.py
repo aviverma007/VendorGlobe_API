@@ -58,6 +58,11 @@ app = Flask(__name__)
 import pr2po  # noqa: E402
 pr2po.register(app)
 
+# Collection dashboard (/collections/data, /collections/health) — reads
+# the CRM team's three Excel files straight from the shared folder.
+import collections_dash  # noqa: E402
+collections_dash.register(app)
+
 # ── Access log (Werkzeug request lines → access.log, rotating 5 MB × 3) ──
 import logging
 from logging.handlers import RotatingFileHandler as _RFH
