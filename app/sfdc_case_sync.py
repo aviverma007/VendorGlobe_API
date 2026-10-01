@@ -51,6 +51,7 @@ STATE_TABLE = TABLE + "_SYNC_STATE"
 INTERVAL_MIN = int(_env("SFDC_INTERVAL_MIN", "30"))
 OVERLAP_MIN = int(_env("SFDC_OVERLAP_MIN", "5"))
 BACKFILL_START = _env("SFDC_BACKFILL_START", "2020-01-01T00:00:00Z")
+MAX_PAGES_PER_RUN = int(_env("SFDC_MAX_PAGES_PER_RUN", "300"))
 
 # SOQL from the SFDC integration doc, plus SystemModstamp for the
 # watermark. FORMAT(...) kept exactly as specified by their team.
@@ -76,7 +77,7 @@ SOQL_FIELDS = (
 _lock = threading.Lock()
 _status = {"configured": bool(CLIENT_ID and CLIENT_SECRET), "last_run": None,
            "last_ok": None, "last_error": None, "last_fetched": 0,
-           "last_upserted": 0, "watermark": None, "runs": 0}
+           "last_upserted": 0, "watermark": None, "runs": 0, "caught_up": None}
 
 
 def _log(msg):
@@ -133,7 +134,7 @@ def _get_watermark(cur):
     return row[0] if row and row[0] else None
 
 
-def _set_watermark(cur, wm):
+def _set_watermark(cur, wm):  # wm=None clears it
     cur.execute(f"""
         MERGE dbo.{STATE_TABLE} AS t
         USING (SELECT 1 AS Id) AS s ON t.Id = s.Id
@@ -173,28 +174,26 @@ def _flatten(rec, prefix=""):
     return out
 
 
-def _fetch_since(cutoff_iso, token):
+def _pages_since(cutoff_iso, token):
+    """Yield (records, done_flag) one Salesforce page at a time.
+    ASC order so a capped run can resume from the watermark next cycle
+    without leaving holes in older history."""
     soql = (f"SELECT {SOQL_FIELDS} FROM Case "
-            f"WHERE SystemModstamp >= {cutoff_iso} ORDER BY SystemModstamp DESC")
+            f"WHERE SystemModstamp >= {cutoff_iso} ORDER BY SystemModstamp ASC")
     url = f"{BASE}/services/data/{API_VER}/query/"
     params = {"q": soql}
     headers = {"Authorization": f"Bearer {token}"}
-    records, pages = [], 0
     while True:
         r = requests.get(url, params=params, headers=headers, timeout=120)
         r.raise_for_status()
         j = r.json()
-        records.extend(j.get("records", []))
-        pages += 1
-        if j.get("done", True) or not j.get("nextRecordsUrl"):
-            break
+        done = bool(j.get("done", True)) or not j.get("nextRecordsUrl")
+        yield j.get("records", []), done
+        if done:
+            return
         # use nextRecordsUrl exactly as provided (per the SFDC doc)
         url = BASE + j["nextRecordsUrl"]
         params = None
-        if pages > 500:          # safety stop: 500 pages ~ 1M rows
-            _log("WARN: pagination stopped at 500 pages")
-            break
-    return records, pages
 
 
 # ---------------------------------------------------------------- sync --
@@ -224,7 +223,7 @@ def _upsert(cur, flats):
     return n
 
 
-def sync_once():
+def sync_once(reset=False):
     with _lock:
         _status["runs"] += 1
         _status["last_run"] = datetime.now(timezone.utc).isoformat()
@@ -235,6 +234,9 @@ def sync_once():
             conn = _connect()
             cur = conn.cursor()
             _ensure_tables(cur)
+            if reset:
+                _set_watermark(cur, None)
+                _log("watermark reset — full backfill restarts")
             wm = _get_watermark(cur)
             if wm:
                 cut = datetime.fromisoformat(wm.replace("Z", "+00:00")) - timedelta(minutes=OVERLAP_MIN)
@@ -243,18 +245,30 @@ def sync_once():
                 cutoff = BACKFILL_START
                 _log(f"first run — backfilling from {cutoff}")
             token = _token()
-            records, pages = _fetch_since(cutoff, token)
-            flats = [_flatten(r) for r in records]
-            n = _upsert(cur, flats)
-            stamps = [f.get("SystemModstamp") for f in flats if f.get("SystemModstamp")]
-            if stamps:
-                _set_watermark(cur, max(stamps))
+            fetched = upserted = pages = 0
+            caught_up = True
+            for records, done in _pages_since(cutoff, token):
+                pages += 1
+                fetched += len(records)
+                flats = [_flatten(r) for r in records]
+                upserted += _upsert(cur, flats)
+                stamps = [f.get("SystemModstamp") for f in flats if f.get("SystemModstamp")]
+                if stamps:
+                    _set_watermark(cur, max(stamps))   # advance as we go — resumable
+                if pages % 25 == 0:
+                    _log(f"  ... {pages} pages, {fetched} records so far")
+                if not done and pages >= MAX_PAGES_PER_RUN:
+                    caught_up = False
+                    _log(f"page cap {MAX_PAGES_PER_RUN} reached — next cycle resumes from the watermark")
+                    break
             new_wm = _get_watermark(cur)
             conn.close()
             _status.update({"last_ok": datetime.now(timezone.utc).isoformat(),
-                            "last_error": None, "last_fetched": len(records),
-                            "last_upserted": n, "watermark": new_wm})
-            _log(f"cutoff {cutoff} -> {len(records)} records / {pages} page(s), upserted {n}, watermark {new_wm}")
+                            "last_error": None, "last_fetched": fetched,
+                            "last_upserted": upserted, "watermark": new_wm,
+                            "caught_up": caught_up})
+            _log(f"cutoff {cutoff} -> {fetched} records / {pages} page(s), upserted {upserted}, "
+                 f"watermark {new_wm}, caught_up={caught_up}")
         except Exception as e:           # noqa: BLE001 — keep the loop alive
             _status["last_error"] = str(e)
             _log(f"ERROR: {e}")
@@ -266,7 +280,8 @@ def run_forever():
          f"({'configured' if _status['configured'] else 'NOT CONFIGURED: waiting for env'})")
     while True:
         sync_once()
-        time.sleep(INTERVAL_MIN * 60)
+        # while the backfill is still behind, keep going after a breather
+        time.sleep(30 if _status.get("caught_up") is False else INTERVAL_MIN * 60)
 
 
 def start_background_thread():
@@ -297,7 +312,8 @@ def register(app):
 
     @app.route("/sfdc/cases/sync", methods=["POST", "GET"])
     def sfdc_cases_sync_now():
-        return jsonify(sync_once())
+        from flask import request as _r
+        return jsonify(sync_once(reset=_r.args.get("reset") == "1"))
 
 
 if __name__ == "__main__":
