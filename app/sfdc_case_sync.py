@@ -293,10 +293,127 @@ def start_background_thread():
     return t
 
 
+
+# ------------------------------------------------- dashboard dataset --
+
+_DAY0 = datetime(2022, 1, 1)
+_data_cache = {"key": None, "payload": None}
+
+
+def _case_day(v):
+    """SFDC date/datetime text -> day offset from 2022-01-01 (−1 blank).
+    Handles ISO, 'YYYY-MM-DD', and FORMAT() locale strings like
+    '30/9/2026, 12:10 pm' or '9/30/2026, 12:10 PM'."""
+    if not v:
+        return -1
+    t = str(v).strip()
+    if not t:
+        return -1
+    head = t.split(",")[0].split("T")[0].strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            return (datetime.strptime(head, fmt) - _DAY0).days
+        except ValueError:
+            continue
+    return -1
+
+
+def _num_or(v, default=0):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_case_dataset():
+    """dbo.SFDC_CASES -> the dict-coded dataset the Case Management tab
+    consumes (same shape as the bundled caseManagement.json)."""
+    conn = _connect()
+    cur = conn.cursor()
+    _ensure_tables(cur)
+    wm = _get_watermark(cur)
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = (wm, today)
+    if _data_cache["key"] == key and _data_cache["payload"]:
+        conn.close()
+        return _data_cache["payload"]
+
+    want = ["SfdcId", "CaseNumber", "Account_Name", "Status", "CaseType__c",
+            "Priority", "Origin", "TAT_Status__c", "Area__c", "Sub_Area__c",
+            "Project__r_Name", "Owner_Name", "Case_Applicability__c",
+            "CreatedDate", "ClosedDate", "Closed_Date_date_only__c",
+            "Account_HNI__c", "Active_Legal_Case__c", "Number_of_Reassigns__c",
+            "Team_Leader_name__c"]
+    have = _existing_columns(cur)
+    cols = [c for c in want if c in have]
+    cur.execute(f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM dbo.{TABLE}")
+    ix = {c: i for i, c in enumerate(cols)}
+
+    def g(row, col):
+        i = ix.get(col)
+        return row[i] if i is not None else None
+
+    lists = {k: [] for k in ("STA", "TYP", "PRI", "ORG", "TAT", "AREA",
+                             "SUBA", "PRJ", "OWN", "APP", "TL")}
+    seen = {k: {} for k in lists}
+
+    def enc(kind, val):
+        v = (str(val).strip() if val not in (None, "") else "")
+        if not v:
+            return -1 if kind in ("TAT", "TL") else _enc_blank(kind)
+        d = seen[kind]
+        if v not in d:
+            d[v] = len(lists[kind])
+            lists[kind].append(v)
+        return d[v]
+
+    def _enc_blank(kind):
+        return enc(kind, "—")
+
+    today_day = (datetime.now() - _DAY0).days
+    R = []
+    for row in cur.fetchall():
+        open_d = _case_day(g(row, "CreatedDate"))
+        closed_d = _case_day(g(row, "Closed_Date_date_only__c"))
+        if closed_d < 0:
+            closed_d = _case_day(g(row, "ClosedDate"))
+        age = (closed_d - open_d) if (closed_d >= 0 and open_d >= 0) else               (today_day - open_d) if open_d >= 0 else 0
+        R.append([
+            open_d, closed_d,
+            enc("STA", g(row, "Status")), enc("TYP", g(row, "CaseType__c")),
+            enc("PRI", g(row, "Priority")), enc("ORG", g(row, "Origin")),
+            enc("TAT", g(row, "TAT_Status__c")), enc("AREA", g(row, "Area__c")),
+            enc("SUBA", g(row, "Sub_Area__c")), enc("PRJ", g(row, "Project__r_Name")),
+            enc("OWN", g(row, "Owner_Name")), enc("APP", g(row, "Case_Applicability__c")),
+            max(age, 0),
+            str(g(row, "Account_Name") or ""),
+            str(g(row, "CaseNumber") or ""),
+            1 if str(g(row, "Account_HNI__c")) == "1" else 0,
+            1 if str(g(row, "Active_Legal_Case__c")) == "1" else 0,
+            _num_or(g(row, "Number_of_Reassigns__c")),
+            enc("TL", g(row, "Team_Leader_name__c")),
+        ])
+    conn.close()
+
+    stamp = (wm or "")[:16].replace("T", " ")
+    payload = {**lists, "R": R,
+               "meta": {"rows": len(R), "asOn": f"live · synced {stamp} UTC",
+                        "source": "Salesforce sync (SFDC_CASES)",
+                        "watermark": wm, "live": True}}
+    _data_cache.update({"key": key, "payload": payload})
+    return payload
+
 # ---------------------------------------------------------------- Flask --
 
 def register(app):
-    from flask import jsonify
+    from flask import jsonify, request as _rq
+
+    @app.after_request
+    def _sfdc_cors(resp):
+        if _rq.path.startswith("/sfdc"):
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
 
     @app.route("/sfdc/cases/health")
     def sfdc_cases_health():
@@ -312,6 +429,13 @@ def register(app):
         except Exception as e:           # noqa: BLE001
             out["db_error"] = str(e)
         return jsonify(out)
+
+    @app.route("/sfdc/cases/data")
+    def sfdc_cases_data():
+        try:
+            return jsonify({"ok": True, **_build_case_dataset()})
+        except Exception as e:           # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)}), 500
 
     @app.route("/sfdc/cases/sync", methods=["POST", "GET"])
     def sfdc_cases_sync_now():
