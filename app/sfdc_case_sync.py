@@ -50,7 +50,9 @@ TABLE = _env("SFDC_TABLE", "SFDC_CASES")
 STATE_TABLE = TABLE + "_SYNC_STATE"
 INTERVAL_MIN = int(_env("SFDC_INTERVAL_MIN", "30"))
 OVERLAP_MIN = int(_env("SFDC_OVERLAP_MIN", "5"))
-BACKFILL_START = _env("SFDC_BACKFILL_START", "2020-01-01T00:00:00Z")
+# Only cases created this financial year onwards (FY starts 1 Apr)
+CREATED_FROM = _env("SFDC_CREATED_FROM", "2026-04-01T00:00:00Z")
+BACKFILL_START = _env("SFDC_BACKFILL_START", "2026-04-01T00:00:00Z")
 MAX_PAGES_PER_RUN = int(_env("SFDC_MAX_PAGES_PER_RUN", "300"))
 
 # SOQL from the SFDC integration doc, plus SystemModstamp for the
@@ -179,7 +181,8 @@ def _pages_since(cutoff_iso, token):
     ASC order so a capped run can resume from the watermark next cycle
     without leaving holes in older history."""
     soql = (f"SELECT {SOQL_FIELDS} FROM Case "
-            f"WHERE SystemModstamp >= {cutoff_iso} ORDER BY SystemModstamp ASC")
+            f"WHERE SystemModstamp >= {cutoff_iso} "
+            f"AND CreatedDate >= {CREATED_FROM} ORDER BY SystemModstamp ASC")
     url = f"{BASE}/services/data/{API_VER}/query/"
     params = {"q": soql}
     headers = {"Authorization": f"Bearer {token}"}
