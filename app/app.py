@@ -63,6 +63,15 @@ pr2po.register(app)
 import collections_dash  # noqa: E402
 collections_dash.register(app)
 
+# Salesforce Case delta sync (/sfdc/cases/health, /sfdc/cases/sync)
+try:
+    import sfdc_case_sync  # noqa: E402
+    sfdc_case_sync.register(app)
+    _SFDC_SYNC_AVAILABLE = True
+except Exception as _e5:
+    _SFDC_SYNC_AVAILABLE = False
+    _SFDC_SYNC_IMPORT_ERROR = _e5
+
 # ── Access log (Werkzeug request lines → access.log, rotating 5 MB × 3) ──
 import logging
 from logging.handlers import RotatingFileHandler as _RFH
@@ -984,6 +993,14 @@ if __name__ == "__main__":
             print(f"[odata_sync] Failed to start: {e}")
     else:
         print(f"[odata_sync] Not available ({_ODATA_SYNC_IMPORT_ERROR})")
+
+    if _SFDC_SYNC_AVAILABLE:
+        try:
+            sfdc_case_sync.start_background_thread()
+        except Exception as e:
+            print(f"[sfdc_case_sync] Failed to start: {e}")
+    else:
+        print(f"[sfdc_case_sync] Not available ({_SFDC_SYNC_IMPORT_ERROR})")
 
     print(f"Serving live PR report on http://localhost:{PORT}")
     try:
