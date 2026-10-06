@@ -61,11 +61,18 @@ VG_COLS = [
 
 def _connect(database):
     import pyodbc
-    return pyodbc.connect(
+    conn = pyodbc.connect(
         f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
         f"DATABASE={database};Trusted_Connection=yes;TrustServerCertificate=yes;",
         timeout=8,
     )
+    # Dashboard reads must never block on (or deadlock with) the sync
+    # writers' upsert transactions - dirty reads are fine for reporting.
+    try:
+        conn.cursor().execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+    except Exception:  # noqa: BLE001
+        pass
+    return conn
 
 
 def _dict_rows(cur):
@@ -399,7 +406,17 @@ def register(app):
 
             # VendorGlobe first: its window EPRs widen the SAP fetch
             # (two-way match), then the SAP PR set widens VG in return.
-            vg_window = _query_vg(startdate, enddate, set())
+            vg_window = None
+            for _attempt in range(2):   # one retry if picked as deadlock victim
+                try:
+                    vg_window = _query_vg(startdate, enddate, set())
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if _attempt == 0 and ("1205" in str(e) or "40001" in str(e)):
+                        import time as _t
+                        _t.sleep(0.5)
+                        continue
+                    raise
             vg_eprs = {str(r.get("EPR_No") or "") for r in vg_window}
 
             sap_error = None

@@ -448,7 +448,24 @@ def nfatat_returned():
 
 
 def _db_rows(table_name):
-    """All rows from our SQL table as a list of dicts (instant, no vendor call)."""
+    """All rows from our SQL table as a list of dicts (instant, no vendor call).
+    READ UNCOMMITTED + one retry: report reads never deadlock with the
+    sync writers (error 1205 picked these as deadlock victim before)."""
+    import pyodbc
+    last = None
+    for _attempt in range(2):
+        try:
+            return _db_rows_once(table_name)
+        except pyodbc.Error as e:  # retry only on deadlock victim
+            last = e
+            if "1205" not in str(e) and "40001" not in str(e):
+                raise
+            import time as _t
+            _t.sleep(0.5)
+    raise last
+
+
+def _db_rows_once(table_name):
     import pyodbc
     conn = pyodbc.connect(
         f"DRIVER={{{cfg.ODBC_DRIVER}}};SERVER={cfg.DB_SERVER};"
@@ -456,6 +473,7 @@ def _db_rows(table_name):
         timeout=8,
     )
     try:
+        conn.cursor().execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
         cur = conn.cursor()
         cur.execute(f"SELECT * FROM [dbo].[{table_name}] ORDER BY fetched_at DESC")
         cols = [d[0] for d in cur.description]
