@@ -140,11 +140,15 @@ def _load_existing(conn, data_columns):
     return existing
 
 
-def fetch_and_store():
-    startdate, enddate = _current_window()
+def fetch_and_store(startdate=None, enddate=None, timeout=30):
+    """Pull one window from the source report and upsert it.
+    With no args: the normal rolling window. With explicit dates:
+    used by backfill() for historical month-chunks."""
+    if startdate is None or enddate is None:
+        startdate, enddate = _current_window()
     url = f"{cfg.NFATAT_SOURCE_URL_BASE}?startdate={startdate}&enddate={enddate}"
 
-    resp = requests.get(url, timeout=30)
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     rows = normalize_rows(resp.json())
     if not rows:
@@ -222,6 +226,31 @@ def fetch_and_store():
             conn.close()
 
     return (inserted, updated, unchanged)
+
+
+def backfill(start_date):
+    """One-time historical load: walk month windows from start_date to
+    today through the same one-row-per-EPR_No upsert the rolling sync
+    uses. Idempotent - safe to re-run; existing rows just update.
+    Returns a per-window summary list."""
+    from datetime import date
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    today = datetime.now().date()
+    results = []
+    cur = start
+    while cur <= today:
+        nxt = (cur.replace(day=1) + timedelta(days=32)).replace(day=1)
+        wend = min(nxt - timedelta(days=1), today)
+        try:
+            ins, upd, same = fetch_and_store(cur.isoformat(), wend.isoformat(), timeout=120)
+            results.append({"window": f"{cur} to {wend}", "inserted": ins,
+                            "updated": upd, "unchanged": same})
+            print(f"[nfatat backfill] {cur} to {wend}: +{ins} new, ~{upd} updated")
+        except Exception as e:
+            results.append({"window": f"{cur} to {wend}", "error": str(e)})
+            print(f"[nfatat backfill] {cur} to {wend}: ERROR {e}")
+        cur = nxt
+    return results
 
 
 def init():

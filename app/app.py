@@ -531,6 +531,24 @@ def db_nfatat():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+@app.route("/nfatat/backfill")
+def nfatat_backfill():
+    """One-time historical load of the NFA TAT table, month by month.
+    Usage: /nfatat/backfill?start=2024-01-01  (runs synchronously;
+    give the client a long timeout). Idempotent - re-running only
+    updates existing rows."""
+    start = request.args.get("start")
+    if not start:
+        return jsonify({"ok": False, "error": "pass ?start=YYYY-MM-DD"}), 400
+    try:
+        import nfa_tat_writer
+        results = nfa_tat_writer.backfill(start)
+        total_new = sum(r.get("inserted", 0) for r in results)
+        return jsonify({"ok": True, "windows": results, "total_new": total_new})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
 @app.route("/api/data")
 def api_data():
     try:
