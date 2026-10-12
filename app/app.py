@@ -72,6 +72,16 @@ except Exception as _e5:
     _SFDC_SYNC_AVAILABLE = False
     _SFDC_SYNC_IMPORT_ERROR = _e5
 
+# Salesforce Named-Query syncs: Digital Enquiries + Gallery Footfall
+# (/sfdc/digital/*, /sfdc/footfall/*)
+try:
+    import sfdc_named_sync  # noqa: E402
+    sfdc_named_sync.register(app)
+    _SFDC_NQ_AVAILABLE = True
+except Exception as _e6:
+    _SFDC_NQ_AVAILABLE = False
+    _SFDC_NQ_IMPORT_ERROR = _e6
+
 # ── Access log (Werkzeug request lines → access.log, rotating 5 MB × 3) ──
 import logging
 from logging.handlers import RotatingFileHandler as _RFH
@@ -1037,6 +1047,14 @@ if __name__ == "__main__":
             print(f"[sfdc_case_sync] Failed to start: {e}")
     else:
         print(f"[sfdc_case_sync] Not available ({_SFDC_SYNC_IMPORT_ERROR})")
+
+    if _SFDC_NQ_AVAILABLE:
+        try:
+            sfdc_named_sync.start_background_threads()
+        except Exception as e:
+            print(f"[sfdc_named_sync] Failed to start: {e}")
+    else:
+        print(f"[sfdc_named_sync] Not available ({_SFDC_NQ_IMPORT_ERROR})")
 
     print(f"Serving live PR report on http://localhost:{PORT}")
     try:

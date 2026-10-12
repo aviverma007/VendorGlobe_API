@@ -158,3 +158,20 @@ on PRNFATatReportHistory means this dedup was removed - restore it.
 - [ ] Firewall-disabled disclosure to infra/HOD (5.3)
 - [ ] Revoke GitHub PAT used during Aug-Sep sessions
 - [ ] Optional: /health endpoint, nightly DB backup to E:, change-audit table
+
+## Salesforce Named-Query feeds (Digital Enquiries, Gallery Footfall)
+
+`app/sfdc_named_sync.py` — same connected app as the Case sync
+(`VG_SFDC_CLIENT_ID` / `VG_SFDC_CLIENT_SECRET`), same database. Every
+30 min: `GET /services/data/v65.0/named/query/<Query>?lastsync=<UTC>`,
+follows `nextRecordsUrl`, upserts into `SFDC_DIGITAL_ENQUIRIES` /
+`SFDC_GALLERY_FOOTFALL` (one column per field, created on demand). The
+watermark is the start of the last fully successful cycle (minus a 5-min
+overlap), so downtime self-heals.
+
+* Digital Enquiries runs by default (`VG_SFDC_DIGITAL_QUERY=DigitalEnquiries`).
+* Gallery Footfall stays idle until `VG_SFDC_FOOTFALL_QUERY=<named query name>` is set.
+* Check: `/sfdc/digital/health` (row count, watermark, column list), `/sfdc/digital/data`,
+  force a cycle with `/sfdc/digital/sync` (`?reset=1` = full re-backfill from
+  `VG_SFDC_NQ_BACKFILL_START`, default 2026-04-01). Same for `/sfdc/footfall/*`.
+* Restart the service after `git pull` — no new pip packages needed.
