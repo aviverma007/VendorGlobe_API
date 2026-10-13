@@ -333,7 +333,17 @@ def _build_case_dataset():
     _ensure_tables(cur)
     wm = _get_watermark(cur)
     today = datetime.now().strftime("%Y-%m-%d")
-    key = (wm, today)
+    # cheap fingerprint of the table itself, so direct SQL edits (not just a
+    # Salesforce sync moving the watermark) also invalidate the cached dataset
+    have0 = _existing_columns(cur)
+    fp_cols = [c for c in ("SfdcId", "Status", "TAT_Status__c", "Owner_Name", "Priority",
+                           "Closed_Date_date_only__c", "ClosedDate") if c in have0]
+    fp = None
+    if fp_cols:
+        cur.execute(f"SELECT COUNT(*), CHECKSUM_AGG(CHECKSUM({', '.join('[' + c + ']' for c in fp_cols)})) FROM dbo.{TABLE}")
+        r0 = cur.fetchone()
+        fp = (int(r0[0] or 0), int(r0[1] or 0))
+    key = (wm, today, fp)
     if _data_cache["key"] == key and _data_cache["payload"]:
         conn.close()
         return _data_cache["payload"]
@@ -399,7 +409,7 @@ def _build_case_dataset():
     payload = {**lists, "R": R,
                "meta": {"rows": len(R), "asOn": f"live · synced {stamp} UTC",
                         "source": "Salesforce sync (SFDC_CASES)",
-                        "watermark": wm, "live": True}}
+                        "watermark": wm, "live": True, "ver": f"{fp[0]}-{fp[1]}" if fp else str(wm)}}
     _data_cache.update({"key": key, "payload": payload})
     return payload
 
