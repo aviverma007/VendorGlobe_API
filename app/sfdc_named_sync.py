@@ -256,6 +256,99 @@ def sync_once(key, reset=False):
         return dict(st)
 
 
+# ------------------------------------------------- Digital dataset (dashboard shape)
+
+_STAGE_RANK = ["booked", "inventory", "in progress", "site visit", "new", "closed lost"]   # most advanced first
+_dig_cache = {"key": None, "payload": None}
+
+
+def _opp_stage(raw):
+    """Opportunities__r_records (text of a list of dicts) -> most advanced stage, or ''."""
+    import ast
+    if not raw or raw in ("None", "[]"):
+        return "", None
+    try:
+        recs = ast.literal_eval(raw)
+    except Exception:                      # noqa: BLE001
+        try:
+            recs = json.loads(raw)
+        except Exception:                  # noqa: BLE001
+            return "", None
+    stages, key_used = [], None
+    for r in recs if isinstance(recs, list) else []:
+        if not isinstance(r, dict):
+            continue
+        for k, v in r.items():
+            if k != "attributes" and "stage" in k.lower() and v:
+                stages.append(str(v)); key_used = key_used or k
+                break
+    if not stages:
+        return "", None
+    def rank(x):
+        try: return _STAGE_RANK.index(x.strip().lower())
+        except ValueError: return len(_STAGE_RANK)
+    return sorted(stages, key=rank)[0], key_used
+
+
+def _digital_dataset():
+    """dbo.SFDC_DIGITAL_ENQUIRIES -> the dict-coded dataset the Digital Leads
+    screens consume (same shape as the bundled digitalEnquiries.json)."""
+    f = FEEDS["digital"]
+    conn = base._connect(); cur = conn.cursor()
+    _ensure_tables(cur, f)
+    cur.execute(f"SELECT COUNT(*), MAX(SyncedAt) FROM dbo.{f.table}")
+    n, mx = cur.fetchone()
+    key = (int(n or 0), str(mx))
+    if _dig_cache["key"] == key and _dig_cache["payload"]:
+        conn.close(); return _dig_cache["payload"]
+    have = _columns(cur, f)
+    want = ["Enquiry_Sub_Source__c", "Project__r_Name", "Status__c", "Agency_Source__c",
+            "Owner_Name", "Opportunities__r_records", "CreatedDate"]
+    cols = [c for c in want if c in have]
+    cur.execute(f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM dbo.{f.table}")
+    ix = {c: i for i, c in enumerate(cols)}
+    rows = cur.fetchall()
+    wm = _get_wm(cur, f)
+    conn.close()
+
+    lex = {k: {} for k in ("SUB", "PRJ", "STA", "AGN", "OWN", "STG")}
+    def g(r, c):
+        return r[ix[c]] if c in ix and r[ix[c]] is not None else None
+    parsed = []
+    stage_key = None
+    for r in rows:
+        stg, sk = _opp_stage(g(r, "Opportunities__r_records"))
+        stage_key = stage_key or sk
+        parsed.append((g(r, "Enquiry_Sub_Source__c") or "", g(r, "Project__r_Name") or "",
+                       g(r, "Status__c") or "", (g(r, "Agency_Source__c") or "").strip() or "-",
+                       g(r, "Owner_Name") or "", stg, g(r, "CreatedDate")))
+        for k, v in zip(("SUB", "PRJ", "STA", "AGN", "OWN", "STG"), parsed[-1][:6]):
+            if v != "":
+                lex[k][v] = 1
+    L = {k: sorted(v, key=lambda x: x.lower()) for k, v in lex.items()}
+    pos = {k: {x: i for i, x in enumerate(v)} for k, v in L.items()}
+    epoch = datetime(2022, 1, 1)
+    R = []
+    for sub, prj, sta, agn, own, stg, cd in parsed:
+        day = -1
+        if cd:
+            try:
+                dt = datetime.strptime(str(cd)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S") + timedelta(hours=5, minutes=30)
+                day = (dt - epoch).days
+            except ValueError:
+                pass
+        R.append([pos["SUB"].get(sub, -1), pos["PRJ"].get(prj, -1), pos["STA"].get(sta, -1),
+                  pos["AGN"].get(agn, -1), pos["OWN"].get(own, -1), pos["STG"].get(stg, -1), day])
+    stamp = (wm or "")[:16].replace("T", " ")
+    payload = {**L, "epoch": "2022-01-01", "R": R,
+               "meta": {"rows": len(R), "source": "Salesforce named query DigitalEnquiries (SFDC_DIGITAL_ENQUIRIES)",
+                        "asOn": f"live · synced {stamp} UTC", "note": "PII columns deliberately excluded",
+                        "live": True, "ver": f"{key[0]}-{key[1]}", "stageKey": stage_key,
+                        "withStage": sum(1 for x in R if x[5] >= 0)}}
+    _dig_cache.update({"key": key, "payload": payload})
+    return payload
+
+
 def _loop(key):
     f = FEEDS[key]
     _log(f"{key}: scheduler started - every {INTERVAL_MIN} min "
@@ -328,6 +421,14 @@ def register(app):
 
     for k in FEEDS:
         _feed(k)
+
+    @app.route("/sfdc/digital/dataset")
+    def sfdc_digital_dataset():
+        try:
+            return jsonify({"ok": True, **_digital_dataset()})
+        except Exception as e:             # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)}), 500
+
 
 
 if __name__ == "__main__":
