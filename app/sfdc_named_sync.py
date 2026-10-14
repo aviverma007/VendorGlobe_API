@@ -290,6 +290,34 @@ def _opp_stage(raw):
     return sorted(stages, key=rank)[0], key_used
 
 
+_DATE_FORMATS = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y, %I:%M %p",
+                 "%d/%m/%Y", "%m/%d/%Y, %I:%M %p", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y",
+                 "%d-%b-%Y %H:%M:%S", "%d-%b-%Y", "%d %b %Y"]
+
+
+def _created_day(cd, epoch):
+    """Salesforce CreatedDate (UTC ISO, or a FORMAT()-ed local string) -> day number since 2022-01-01 (IST), or -1."""
+    if cd is None:
+        return -1
+    t = str(cd).strip()
+    if not t or t.lower() == "none":
+        return -1
+    iso = t.replace("T", " ")
+    try:                                    # ISO with offset / Z / millis -> UTC -> IST
+        dt = datetime.strptime(iso[:19], "%Y-%m-%d %H:%M:%S")
+        if iso[19:].strip().startswith(("Z", "+0000", ".000+0000", ".000Z")) or len(iso) > 19:
+            dt += timedelta(hours=5, minutes=30)
+        return (dt - epoch).days
+    except ValueError:
+        pass
+    for fmt in _DATE_FORMATS:               # FORMAT()-ed values are already in the user's local time
+        try:
+            return (datetime.strptime(t, fmt) - epoch).days
+        except ValueError:
+            continue
+    return -1
+
+
 def _digital_dataset():
     """dbo.SFDC_DIGITAL_ENQUIRIES -> the dict-coded dataset the Digital Leads
     screens consume (same shape as the bundled digitalEnquiries.json)."""
@@ -329,14 +357,11 @@ def _digital_dataset():
     pos = {k: {x: i for i, x in enumerate(v)} for k, v in L.items()}
     epoch = datetime(2022, 1, 1)
     R = []
+    bad = []
     for sub, prj, sta, agn, own, stg, cd in parsed:
-        day = -1
-        if cd:
-            try:
-                dt = datetime.strptime(str(cd)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S") + timedelta(hours=5, minutes=30)
-                day = (dt - epoch).days
-            except ValueError:
-                pass
+        day = _created_day(cd, epoch)
+        if day < 0 and len(bad) < 6 and str(cd) not in bad:
+            bad.append(str(cd))
         R.append([pos["SUB"].get(sub, -1), pos["PRJ"].get(prj, -1), pos["STA"].get(sta, -1),
                   pos["AGN"].get(agn, -1), pos["OWN"].get(own, -1), pos["STG"].get(stg, -1), day])
     stamp = (wm or "")[:16].replace("T", " ")
@@ -344,7 +369,8 @@ def _digital_dataset():
                "meta": {"rows": len(R), "source": "Salesforce named query DigitalEnquiries (SFDC_DIGITAL_ENQUIRIES)",
                         "asOn": f"live · synced {stamp} UTC", "note": "PII columns deliberately excluded",
                         "live": True, "ver": f"{key[0]}-{key[1]}", "stageKey": stage_key,
-                        "withStage": sum(1 for x in R if x[5] >= 0)}}
+                        "withStage": sum(1 for x in R if x[5] >= 0),
+                        "noDate": sum(1 for x in R if x[6] < 0), "badDateSamples": bad}}
     _dig_cache.update({"key": key, "payload": payload})
     return payload
 
