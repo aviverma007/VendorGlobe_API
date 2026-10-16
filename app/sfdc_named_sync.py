@@ -41,6 +41,7 @@ import sys
 import time
 import hashlib
 import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -318,6 +319,33 @@ def _created_day(cd, epoch):
     return -1
 
 
+_ENQ_CANDIDATES = ["Enquiry_Number__c", "Enquiry_No__c", "Enquiry_Num__c", "EnquiryNumber__c",
+                   "Enquiry_ID__c", "Enquiry_Id__c", "Enquiry_Code__c", "Enquiry_Name__c"]
+_ENQ_CODE = re.compile(r"^[A-Za-z]{0,6}[-_/]?\d{3,}[A-Za-z0-9-_/]*$")
+
+
+def _pick_enq_col(cur, f, have):
+    """Column holding the enquiry number: env VG_SFDC_DIGITAL_ENQCOL pins it;
+    else the first known custom field present; else Name, but only when its
+    values look like codes (ENQ-00123 / 102345), never person names."""
+    pinned = _env("VG_SFDC_DIGITAL_ENQCOL").strip()
+    if pinned:
+        return (pinned if pinned in have else None), "env"
+    for c in _ENQ_CANDIDATES:
+        if c in have:
+            return c, "candidate"
+    for c in sorted(have):
+        lc = c.lower()
+        if "enq" in lc and ("num" in lc or "no" in lc) and "__r" not in lc:
+            return c, "pattern"
+    if "Name" in have:
+        cur.execute(f"SELECT TOP 50 [Name] FROM dbo.{f.table} WHERE [Name] IS NOT NULL")
+        vals = [str(r[0]).strip() for r in cur.fetchall()]
+        if vals and sum(1 for v in vals if _ENQ_CODE.match(v)) >= 0.9 * len(vals):
+            return "Name", "name-codes"
+    return None, "none"
+
+
 def _digital_dataset():
     """dbo.SFDC_DIGITAL_ENQUIRIES -> the dict-coded dataset the Digital Leads
     screens consume (same shape as the bundled digitalEnquiries.json)."""
@@ -332,6 +360,10 @@ def _digital_dataset():
     have = _columns(cur, f)
     want = ["Enquiry_Sub_Source__c", "Project__r_Name", "Status__c", "Agency_Source__c",
             "Owner_Name", "Opportunities__r_records", "CreatedDate"]
+    enq_col, enq_how = _pick_enq_col(cur, f, have)
+    enq_candidates = sorted(c for c in have if "enq" in c.lower() or c == "Name")
+    if enq_col:
+        want.append(enq_col)
     cols = [c for c in want if c in have]
     cur.execute(f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM dbo.{f.table}")
     ix = {c: i for i, c in enumerate(cols)}
@@ -349,7 +381,8 @@ def _digital_dataset():
         stage_key = stage_key or sk
         parsed.append((g(r, "Enquiry_Sub_Source__c") or "", g(r, "Project__r_Name") or "",
                        g(r, "Status__c") or "", (g(r, "Agency_Source__c") or "").strip() or "-",
-                       g(r, "Owner_Name") or "", stg, g(r, "CreatedDate")))
+                       g(r, "Owner_Name") or "", stg, g(r, "CreatedDate"),
+                       str(g(r, enq_col) or "").strip() if enq_col else ""))
         for k, v in zip(("SUB", "PRJ", "STA", "AGN", "OWN", "STG"), parsed[-1][:6]):
             if v != "":
                 lex[k][v] = 1
@@ -358,19 +391,21 @@ def _digital_dataset():
     epoch = datetime(2022, 1, 1)
     R = []
     bad = []
-    for sub, prj, sta, agn, own, stg, cd in parsed:
+    for sub, prj, sta, agn, own, stg, cd, enq in parsed:
         day = _created_day(cd, epoch)
         if day < 0 and len(bad) < 6 and str(cd) not in bad:
             bad.append(str(cd))
         R.append([pos["SUB"].get(sub, -1), pos["PRJ"].get(prj, -1), pos["STA"].get(sta, -1),
-                  pos["AGN"].get(agn, -1), pos["OWN"].get(own, -1), pos["STG"].get(stg, -1), day])
+                  pos["AGN"].get(agn, -1), pos["OWN"].get(own, -1), pos["STG"].get(stg, -1), day, enq])
     stamp = (wm or "")[:16].replace("T", " ")
     payload = {**L, "epoch": "2022-01-01", "R": R,
                "meta": {"rows": len(R), "source": "Salesforce named query DigitalEnquiries (SFDC_DIGITAL_ENQUIRIES)",
-                        "asOn": f"live · synced {stamp} UTC", "note": "PII columns deliberately excluded",
+                        "asOn": f"live · synced {stamp} UTC", "note": "Customer PII (names, emails, phones) excluded; enquiry number included",
                         "live": True, "ver": f"{key[0]}-{key[1]}", "stageKey": stage_key,
                         "withStage": sum(1 for x in R if x[5] >= 0),
-                        "noDate": sum(1 for x in R if x[6] < 0), "badDateSamples": bad}}
+                        "noDate": sum(1 for x in R if x[6] < 0), "badDateSamples": bad,
+                        "enqCol": enq_col, "enqHow": enq_how, "enqCandidates": enq_candidates,
+                        "withEnq": sum(1 for x in R if x[7])}}
     _dig_cache.update({"key": key, "payload": payload})
     return payload
 
