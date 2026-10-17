@@ -291,12 +291,35 @@ def _opp_stage(raw):
     return sorted(stages, key=rank)[0], key_used
 
 
-_DATE_FORMATS = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y, %I:%M %p",
-                 "%d/%m/%Y", "%m/%d/%Y, %I:%M %p", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y",
-                 "%d-%b-%Y %H:%M:%S", "%d-%b-%Y", "%d %b %Y"]
+_NUM_DATE = re.compile(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?)?$")
+_NAMED_FORMATS = ["%d-%b-%Y %H:%M:%S", "%d-%b-%Y", "%d %b %Y", "%b %d, %Y", "%d-%b-%y"]
 
 
-def _created_day(cd, epoch):
+def _date_order(values):
+    """Decide month-first (MDY) or day-first (DMY) ONCE for the whole CreatedDate
+    column, never per value: a value whose first number is >12 proves DMY, one
+    whose second number is >12 proves MDY. With no proof, Salesforce's en_US
+    FORMAT() order (MDY) is used. VG_SFDC_DIGITAL_DATEORDER=MDY|DMY pins it.
+    Per-value guessing read 10/12/2026 (12 Oct) as 10 Dec - future months."""
+    pinned = _env("VG_SFDC_DIGITAL_DATEORDER").strip().upper()
+    if pinned in ("MDY", "DMY"):
+        return pinned, "env"
+    dmy = mdy = 0
+    for v in values:
+        m = _NUM_DATE.match(str(v or "").strip())
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 12 >= b:
+            dmy += 1
+        elif b > 12 >= a:
+            mdy += 1
+    if dmy > mdy:
+        return "DMY", f"evidence dmy={dmy} mdy={mdy}"
+    return "MDY", f"evidence dmy={dmy} mdy={mdy}" + ("" if mdy else " (default)")
+
+
+def _created_day(cd, epoch, order="MDY"):
     """Salesforce CreatedDate (UTC ISO, or a FORMAT()-ed local string) -> day number since 2022-01-01 (IST), or -1."""
     if cd is None:
         return -1
@@ -311,7 +334,21 @@ def _created_day(cd, epoch):
         return (dt - epoch).days
     except ValueError:
         pass
-    for fmt in _DATE_FORMATS:               # FORMAT()-ed values are already in the user's local time
+    try:
+        return (datetime.strptime(iso[:10], "%Y-%m-%d") - epoch).days
+    except ValueError:
+        pass
+    m = _NUM_DATE.match(t)                  # FORMAT()-ed values are already in local time
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        mo, d = (a, b) if order == "MDY" else (b, a)
+        if y < 100:
+            y += 2000
+        try:
+            return (datetime(y, mo, d) - epoch).days
+        except ValueError:
+            return -1
+    for fmt in _NAMED_FORMATS:
         try:
             return (datetime.strptime(t, fmt) - epoch).days
         except ValueError:
@@ -389,10 +426,12 @@ def _digital_dataset():
     L = {k: sorted(v, key=lambda x: x.lower()) for k, v in lex.items()}
     pos = {k: {x: i for i, x in enumerate(v)} for k, v in L.items()}
     epoch = datetime(2022, 1, 1)
+    order, order_why = _date_order([x[6] for x in parsed])
+    today = (datetime.utcnow() + timedelta(hours=5, minutes=30) - epoch).days
     R = []
     bad = []
     for sub, prj, sta, agn, own, stg, cd, enq in parsed:
-        day = _created_day(cd, epoch)
+        day = _created_day(cd, epoch, order)
         if day < 0 and len(bad) < 6 and str(cd) not in bad:
             bad.append(str(cd))
         R.append([pos["SUB"].get(sub, -1), pos["PRJ"].get(prj, -1), pos["STA"].get(sta, -1),
@@ -404,6 +443,8 @@ def _digital_dataset():
                         "live": True, "ver": f"{key[0]}-{key[1]}", "stageKey": stage_key,
                         "withStage": sum(1 for x in R if x[5] >= 0),
                         "noDate": sum(1 for x in R if x[6] < 0), "badDateSamples": bad,
+                        "dateOrder": order, "dateOrderWhy": order_why,
+                        "futureDated": sum(1 for x in R if x[6] > today + 1),
                         "enqCol": enq_col, "enqHow": enq_how, "enqCandidates": enq_candidates,
                         "withEnq": sum(1 for x in R if x[7])}}
     _dig_cache.update({"key": key, "payload": payload})
