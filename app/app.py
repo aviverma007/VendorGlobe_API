@@ -82,6 +82,16 @@ except Exception as _e6:
     _SFDC_NQ_AVAILABLE = False
     _SFDC_NQ_IMPORT_ERROR = _e6
 
+# Dashboard logins and user rights (/auth/login, /auth/me, /auth/users …)
+try:
+    import dash_auth  # noqa: E402
+    dash_auth.register(app)
+    _DASH_AUTH_AVAILABLE = True
+except Exception as _e7:
+    _DASH_AUTH_AVAILABLE = False
+    _DASH_AUTH_IMPORT_ERROR = _e7
+    print(f"[dash_auth] not loaded: {_e7}", flush=True)
+
 # ── Access log (Werkzeug request lines → access.log, rotating 5 MB × 3) ──
 import logging
 from logging.handlers import RotatingFileHandler as _RFH
