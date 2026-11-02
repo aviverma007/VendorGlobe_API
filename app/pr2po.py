@@ -359,10 +359,28 @@ def _sync_freshness():
                 )
                 age, n = cur.fetchone()
                 out[t] = {"rows": n, "last_sync_age_s": age}
+            # newest PR in the mirror: tells whether SAP BI itself has stopped receiving PRs
+            cur.execute("SELECT MAX([Erdat]), DATEDIFF(day, MAX([Erdat]), CAST(SYSDATETIME() AS date)) FROM [dbo].[SAP_PR]")
+            newest, newest_age = cur.fetchone()
+            out["SAP_PR"]["newest_pr_date"] = str(newest) if newest else None
+            out["SAP_PR"]["newest_pr_age_days"] = newest_age
         finally:
             conn.close()
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)
+    # the mirror loop's own heartbeat (sap_sync.STATUS) — the true "synced X ago"
+    try:
+        import sap_sync
+        from datetime import datetime as _dt
+        st = sap_sync.STATUS
+        now = _dt.now()
+        age = lambda t: int((now - t).total_seconds()) if t else None   # noqa: E731
+        out["loop"] = {
+            "running": st["running"], "last_ok_age_s": age(st["last_ok"]), "last_run_age_s": age(st["last_run"]),
+            "last_error": st["last_error"], "last_error_age_s": age(st["last_error_at"]), "results": st["results"],
+        }
+    except Exception as e:  # noqa: BLE001
+        out["loop"] = {"running": False, "error": str(e)}
     return out
 
 

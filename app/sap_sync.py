@@ -31,6 +31,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db_config as cfg
 
 _lock = threading.Lock()
+# Health of the mirror loop, read by /pr2po (pr2po._sync_freshness). fetched_at only moves when
+# a row is new or changed, so it can't tell "sync is down" from "SAP had nothing new" — this can.
+STATUS = {"last_run": None, "last_ok": None, "last_error": None, "last_error_at": None, "results": None, "running": False}
 
 
 def _env(name, default):
@@ -224,9 +227,13 @@ def run_forever(interval_seconds=None):
     auth = f"SQL login '{SAP_DB_USER}'" if SAP_DB_USER else "Windows trusted auth"
     print(f"[sap_sync] Mirroring {SAP_DB_SERVER}/{SAP_DB_NAME} (PRD_PR, PRD_PurchaseOrder) "
           f"-> {cfg.DB_SERVER}/{PR2PO_DB_NAME} every {interval}s via {auth}")
+    STATUS["running"] = True
     while True:
+        STATUS["last_run"] = datetime.now()
         try:
             results = sync_once()
+            STATUS["last_ok"] = datetime.now()
+            STATUS["results"] = {t: {"new": r[0], "updated": r[1], "unchanged": r[2], "source_rows": r[3]} for t, r in results.items()}
             changed = {t: r for t, r in results.items() if r[0] or r[1]}
             if changed:
                 msg = " · ".join(
@@ -235,6 +242,7 @@ def run_forever(interval_seconds=None):
                 )
                 print(f"[sap_sync] {datetime.now().strftime('%H:%M:%S')} {msg}")
         except Exception as e:  # noqa: BLE001
+            STATUS["last_error"], STATUS["last_error_at"] = str(e)[:500], datetime.now()
             print(f"[sap_sync] ERROR: {e}")
         time.sleep(interval)
 
