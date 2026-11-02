@@ -452,7 +452,7 @@ def _digital_dataset():
             bad.append(str(cd))
         R.append([pos["SUB"].get(sub, -1), pos["PRJ"].get(prj, -1), pos["STA"].get(sta, -1),
                   pos["AGN"].get(agn, -1), pos["OWN"].get(own, -1), pos["STG"].get(stg, -1), day, enq])
-    stamp = (wm or "")[:16].replace("T", " ")
+    stamp = (wm or str(mx or ""))[:16].replace("T", " ")
     payload = {**L, "epoch": "2022-01-01", "R": R,
                "meta": {"rows": len(R), "source": "Salesforce named query DigitalEnquiries (SFDC_DIGITAL_ENQUIRIES)",
                         "asOn": f"live · synced {stamp} UTC", "note": "Customer PII (names, emails, phones) excluded; enquiry number included",
@@ -540,7 +540,8 @@ def _footfall_dataset():
         R.append([ix_of("G", g(r, "g")), ix_of("P", g(r, "p")), ix_of("SRC", g(r, "src")), ix_of("CPN", g(r, "cp")),
                   ix_of("STG", g(r, "stg")), ix_of("LOC", g(r, "loc")), ix_of("AGE", g(r, "age")), ix_of("CAT", g(r, "cat")),
                   day, g(r, "opp")])
-    stamp = (wm or "")[:16].replace("T", " ")
+    # watermark = last fully finished cycle; until the first backfill completes, show when rows last landed
+    stamp = (wm or str(mx or ""))[:16].replace("T", " ")
     payload = {**lists, "epoch": "2022-01-01", "R": R,
                "meta": {"rows": len(R), "source": "Salesforce named query CustomerVisit (SFDC_GALLERY_FOOTFALL)",
                         "asOn": f"live · synced {stamp} UTC", "live": True, "ver": f"{key[0]}-{key[1]}",
