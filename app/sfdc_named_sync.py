@@ -23,16 +23,20 @@ Config (env, VG_ prefix; credentials are shared with the Case sync):
   Digital Enquiries  (enabled by default)
     VG_SFDC_DIGITAL_QUERY       default DigitalEnquiries
     VG_SFDC_DIGITAL_TABLE       default SFDC_DIGITAL_ENQUIRIES
-  Gallery Footfall   (enabled once the named-query name is known)
-    VG_SFDC_FOOTFALL_QUERY      e.g. GalleryFootfall   -- empty = feed idle
+  Gallery Footfall = Customer Visit (Tasks on Opportunities), per "Report_API_SWD_2"
+    VG_SFDC_FOOTFALL_QUERY      default CustomerVisit   (set to empty to switch the feed off)
     VG_SFDC_FOOTFALL_TABLE      default SFDC_GALLERY_FOOTFALL
-  Optional per feed:  VG_SFDC_<DIGITAL|FOOTFALL>_PARAM   (default lastsync)
-                      VG_SFDC_<DIGITAL|FOOTFALL>_ID_FIELD (default Id)
+    VG_SFDC_FOOTFALL_PARAM      default lastsynctime
+    VG_SFDC_FOOTFALL_API_VERSION default v66.0
+  Optional per feed:  VG_SFDC_<DIGITAL|FOOTFALL>_PARAM   (digital default lastsync)
+                      VG_SFDC_<DIGITAL|FOOTFALL>_ID_FIELD (default Id = Task Id for visits)
+                      VG_SFDC_<DIGITAL|FOOTFALL>_API_VERSION (default VG_SFDC_NQ_API_VERSION)
 
 Routes (per feed key = digital | footfall):
     /sfdc/<key>/health   status, row count, watermark, column list
     /sfdc/<key>/data     rows as JSON  (?limit=N&offset=M, newest first)
     /sfdc/<key>/sync     run one cycle now (?reset=1 = full re-backfill)
+    /sfdc/digital/dataset, /sfdc/footfall/dataset   dashboard-shaped datasets
 Standalone:  python sfdc_named_sync.py digital --once
 """
 
@@ -66,13 +70,14 @@ def _log(msg):
 
 
 class Feed:
-    def __init__(self, key, default_query, default_table):
+    def __init__(self, key, default_query, default_table, default_param="lastsync", default_ver=None):
         self.key = key
         U = key.upper()
         self.query = _env(f"SFDC_{U}_QUERY", default_query)
         self.table = _env(f"SFDC_{U}_TABLE", default_table)
         self.state_table = self.table + "_SYNC_STATE"
-        self.param = _env(f"SFDC_{U}_PARAM", "lastsync")
+        self.param = _env(f"SFDC_{U}_PARAM", default_param)
+        self.api_ver = _env(f"SFDC_{U}_API_VERSION", default_ver or API_VER)
         self.id_field = _env(f"SFDC_{U}_ID_FIELD", "Id")
         self.lock = threading.Lock()
         self.status = {"feed": key, "query": self.query or None,
@@ -85,7 +90,7 @@ class Feed:
 
 FEEDS = {
     "digital": Feed("digital", "DigitalEnquiries", "SFDC_DIGITAL_ENQUIRIES"),
-    "footfall": Feed("footfall", "", "SFDC_GALLERY_FOOTFALL"),
+    "footfall": Feed("footfall", "CustomerVisit", "SFDC_GALLERY_FOOTFALL", "lastsynctime", "v66.0"),
 }
 
 
@@ -187,7 +192,7 @@ def _records_of(j):
 def _pages(f, lastsync_iso, token):
     """Yield one response page at a time; nextRecordsUrl is followed exactly
     as returned (per the SFDC doc)."""
-    url = f"{base.BASE}/services/data/{API_VER}/named/query/{f.query}"
+    url = f"{base.BASE}/services/data/{f.api_ver}/named/query/{f.query}"
     params = {f.param: lastsync_iso}
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     while True:
@@ -463,6 +468,89 @@ def _digital_dataset():
     return payload
 
 
+# ------------------------------------------------- Footfall dataset (dashboard shape)
+
+_ff_cache = {"key": None, "payload": None}
+SRC_FIXED = ["Direct", "Channel Partner", "Direct Loyalty", "Digital"]   # dashboard relies on this order
+
+
+def _pick(have, *cands):
+    """First column present, matching case-insensitively (flattened relation names vary)."""
+    low = {c.lower(): c for c in have}
+    for c in cands:
+        if c.lower() in low:
+            return low[c.lower()]
+    return None
+
+
+def _footfall_dataset():
+    """dbo.SFDC_GALLERY_FOOTFALL (CustomerVisit tasks) -> the dict-coded dataset the
+    Gallery Footfall screens consume (same shape as the bundled footfallVisits.json):
+    R = [gallery, project, walkInSource, channelPartner, stage, locality, age, category, day, oppNo]."""
+    f = FEEDS["footfall"]
+    conn = base._connect(); cur = conn.cursor()
+    _ensure_tables(cur, f)
+    cur.execute(f"SELECT COUNT(*), MAX(SyncedAt) FROM dbo.{f.table}")
+    n, mx = cur.fetchone()
+    key = (int(n or 0), str(mx))
+    if _ff_cache["key"] == key and _ff_cache["payload"]:
+        conn.close(); return _ff_cache["payload"]
+    have = _columns(cur, f)
+    C = {
+        "g": _pick(have, "Sales_Gallery_to_Visit__c"),
+        "p": _pick(have, "Project__r_Name"),
+        "src": _pick(have, "What_Walk_in_Source__c", "Walk_in_Source__c"),
+        "cp": _pick(have, "What_Channel_Partner__r_Name", "Channel_Partner__r_Name"),
+        "stg": _pick(have, "What_StageName", "StageName"),
+        "loc": _pick(have, "What_Account_Locality__pr_Name", "Account_Locality__pr_Name"),
+        "age": _pick(have, "What_Account_Customer_Age__c", "Account_Customer_Age__c"),
+        "cat": _pick(have, "What_Category__c", "Category__c"),
+        "day": _pick(have, "Date_and_Time_of_Site_visit__c"),
+        "opp": _pick(have, "What_Opportunity_Number__c", "Opportunity_Number__c"),
+    }
+    cols = [c for c in C.values() if c]
+    rows = []
+    if cols:
+        cur.execute(f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM dbo.{f.table}")
+        rows = cur.fetchall()
+    wm = _get_wm(cur, f)
+    conn.close()
+    ix = {c: i for i, c in enumerate(cols)}
+    def g(r, k):
+        c = C[k]
+        v = r[ix[c]] if c else None
+        return "" if v is None or str(v).strip().lower() == "none" else str(v).strip()
+
+    lists = {k: [] for k in ("G", "P", "SRC", "CPN", "STG", "LOC", "AGE", "CAT")}
+    lists["SRC"] = list(SRC_FIXED)
+    pos = {k: {v: i for i, v in enumerate(lists[k])} for k in lists}
+    def ix_of(k, v):
+        if not v:
+            return -1
+        if v not in pos[k]:
+            pos[k][v] = len(lists[k]); lists[k].append(v)
+        return pos[k][v]
+
+    epoch = datetime(2022, 1, 1)
+    order, order_why = _date_order([g(r, "day") for r in rows])
+    R, no_date = [], 0
+    for r in rows:
+        day = _created_day(g(r, "day") or None, epoch, order)
+        no_date += day < 0
+        R.append([ix_of("G", g(r, "g")), ix_of("P", g(r, "p")), ix_of("SRC", g(r, "src")), ix_of("CPN", g(r, "cp")),
+                  ix_of("STG", g(r, "stg")), ix_of("LOC", g(r, "loc")), ix_of("AGE", g(r, "age")), ix_of("CAT", g(r, "cat")),
+                  day, g(r, "opp")])
+    stamp = (wm or "")[:16].replace("T", " ")
+    payload = {**lists, "epoch": "2022-01-01", "R": R,
+               "meta": {"rows": len(R), "source": "Salesforce named query CustomerVisit (SFDC_GALLERY_FOOTFALL)",
+                        "asOn": f"live · synced {stamp} UTC", "live": True, "ver": f"{key[0]}-{key[1]}",
+                        "from": BACKFILL_START[:10], "columns": C, "noDate": no_date,
+                        "dateOrder": order, "dateOrderWhy": order_why,
+                        "note": "Visitor names and internal remarks excluded"}}
+    _ff_cache.update({"key": key, "payload": payload})
+    return payload
+
+
 def _loop(key):
     f = FEEDS[key]
     _log(f"{key}: scheduler started - every {INTERVAL_MIN} min "
@@ -535,6 +623,13 @@ def register(app):
 
     for k in FEEDS:
         _feed(k)
+
+    @app.route("/sfdc/footfall/dataset")
+    def sfdc_footfall_dataset():
+        try:
+            return jsonify({"ok": True, **_footfall_dataset()})
+        except Exception as e:             # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)}), 500
 
     @app.route("/sfdc/digital/dataset")
     def sfdc_digital_dataset():
