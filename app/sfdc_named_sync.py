@@ -401,6 +401,13 @@ def _digital_dataset():
     enq_candidates = sorted(c for c in have if "enq" in c.lower() or c == "Name")
     if enq_col:
         want.append(enq_col)
+    # Same rule as the Salesforce report: drop enquiries whose contact person name
+    # contains "test". VG_SFDC_DIGITAL_CONTACTCOL pins the column if it is named differently.
+    contact_col = _env("VG_SFDC_DIGITAL_CONTACTCOL").strip() or "Contact_Person__r_Name"
+    if contact_col not in have:
+        contact_col = next((c for c in sorted(have) if "contact" in c.lower() and c.lower().endswith("name")), None)
+    if contact_col:
+        want.append(contact_col)
     cols = [c for c in want if c in have]
     cur.execute(f"SELECT {', '.join('[' + c + ']' for c in cols)} FROM dbo.{f.table}")
     ix = {c: i for i, c in enumerate(cols)}
@@ -413,7 +420,11 @@ def _digital_dataset():
         return r[ix[c]] if c in ix and r[ix[c]] is not None else None
     parsed = []
     stage_key = None
+    removed_test = 0
     for r in rows:
+        if contact_col and "test" in str(g(r, contact_col) or "").lower():
+            removed_test += 1
+            continue
         stg, sk = _opp_stage(g(r, "Opportunities__r_records"))
         stage_key = stage_key or sk
         parsed.append((g(r, "Enquiry_Sub_Source__c") or "", g(r, "Project__r_Name") or "",
@@ -446,7 +457,8 @@ def _digital_dataset():
                         "dateOrder": order, "dateOrderWhy": order_why,
                         "futureDated": sum(1 for x in R if x[6] > today + 1),
                         "enqCol": enq_col, "enqHow": enq_how, "enqCandidates": enq_candidates,
-                        "withEnq": sum(1 for x in R if x[7])}}
+                        "withEnq": sum(1 for x in R if x[7]),
+                        "contactCol": contact_col, "removedTestContact": removed_test}}
     _dig_cache.update({"key": key, "payload": payload})
     return payload
 
