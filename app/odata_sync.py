@@ -77,6 +77,8 @@ ODATA_USER = _env("ODATA_USER", "")
 ODATA_PASSWORD = _env("ODATA_PASSWORD", "")
 ODATA_VERIFY = _env("ODATA_VERIFY", "0") == "1"
 ROLLING_DAYS = int(_env("ODATA_ROLLING_DAYS", "10"))
+# SAP logon client (e.g. "300"); empty = the Gateway's default client
+ODATA_CLIENT = _env("ODATA_CLIENT", "").strip()
 FULL_EVERY = max(1, int(_env("ODATA_FULL_EVERY", "12")))
 INTERVAL = int(_env("ODATA_INTERVAL_SECONDS", "300"))
 BACKFILL_START = _env("ODATA_BACKFILL_START", "2026-06-01")
@@ -188,7 +190,7 @@ def fetch_window(entity, datefield, start_d, end_d):
     url = f"{ODATA_BASE}/{entity}"
     rows, skip = [], 0
     while True:
-        params = {"$filter": filt, "$format": "json"}
+        params = {"$filter": filt, "$format": "json", **_client()}
         if skip:
             params["$skip"] = str(skip)
         resp = requests.get(url, params=params,
@@ -397,8 +399,8 @@ def run_forever(interval_seconds=None):
                 print(f"[odata_sync] {datetime.now().strftime('%H:%M:%S')} {msg}")
         except requests.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
-            hint = (" - SAP user lacks S_SERVICE authorization for the service"
-                    if code in (401, 403) else "")
+            hint = {401: " - SAP rejected the login (password / locked user / client)",
+                    403: " - SAP user lacks S_SERVICE authorization for the service"}.get(code, "")
             STATUS["last_error"], STATUS["last_error_at"] = f"HTTP {code} from SAP{hint}", datetime.now()
             print(f"[odata_sync] HTTP {code} from SAP{hint}")
         except Exception as e:  # noqa: BLE001
@@ -408,16 +410,23 @@ def run_forever(interval_seconds=None):
         time.sleep(interval)
 
 
+def _client():
+    return {"sap-client": ODATA_CLIENT} if ODATA_CLIENT else {}
+
+
 def ping(timeout=10):
     """Quick reachability/auth check of the service root (for /pr2po/health)."""
     if not ODATA_USER:
         return "not configured (VG_ODATA_USER / VG_ODATA_PASSWORD missing)"
     try:
-        r = requests.get(f"{ODATA_BASE}/", params={"$format": "json"},
+        r = requests.get(f"{ODATA_BASE}/", params={"$format": "json", **_client()},
                          auth=(ODATA_USER, ODATA_PASSWORD), verify=ODATA_VERIFY,
                          timeout=timeout, headers={"Accept": "application/json"})
-        if r.status_code in (401, 403):
-            return f"error: HTTP {r.status_code} - SAP user lacks S_SERVICE authorization (or wrong password)"
+        if r.status_code == 401:
+            return ("error: HTTP 401 - SAP rejected the LOGIN: wrong user/password, user locked, "
+                    "or user not in the default client (set VG_ODATA_CLIENT)")
+        if r.status_code == 403:
+            return "error: HTTP 403 - login OK but user lacks S_SERVICE authorization for this service"
         r.raise_for_status()
         return "ok"
     except Exception as e:  # noqa: BLE001
@@ -429,12 +438,13 @@ def probe():
     Never prints credentials."""
     import xml.etree.ElementTree as ET
     print(f"service : {ODATA_BASE}")
-    print(f"user    : {ODATA_USER or '(VG_ODATA_USER not set)'}")
+    print(f"user    : {ODATA_USER or '(VG_ODATA_USER not set)'}  client: {ODATA_CLIENT or '(default)'}")
     print(f"root    : {ping()}")
-    r = requests.get(f"{ODATA_BASE}/$metadata", auth=(ODATA_USER, ODATA_PASSWORD),
+    r = requests.get(f"{ODATA_BASE}/$metadata", params=_client(), auth=(ODATA_USER, ODATA_PASSWORD),
                      verify=ODATA_VERIFY, timeout=60)
     print(f"metadata: HTTP {r.status_code}")
-    r.raise_for_status()
+    if r.status_code != 200:
+        return
     root = ET.fromstring(r.content)
     local = lambda t: t.rsplit("}", 1)[-1]  # noqa: E731
     types = {}
