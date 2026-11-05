@@ -177,7 +177,7 @@ def _norm_value(v):
     m = _MS_DATE.match(s)
     if m:
         try:
-            return datetime.utcfromtimestamp(int(m.group(1)) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            return (datetime(1970, 1, 1) + timedelta(milliseconds=int(m.group(1)))).strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, OSError, OverflowError):
             return s
     return s
