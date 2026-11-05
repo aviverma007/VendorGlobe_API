@@ -28,6 +28,36 @@ Key paths on server 34:
 | Access log | `app\access.log` (rotating 5 MB x3) |
 | Error log | `app\service_stderr.log` |
 
+## SAP PR/PO feed for the PR→PO dashboard (server .28) — since 05-Nov-2026
+
+The old SAP BI database (SWDBIDB on .33) was erased. PR/PO data now comes
+straight from SAP Gateway OData `ZMM_PURCHASE_DASHBOARD_SRV` (PS4, default
+client 100) into `PR2PO` on .28:
+
+| Thing | Value |
+|---|---|
+| Install | `C:\VendorGlobe_API` (Python `C:\VendorGlobe_API\python312\python.exe`, `C:\VendorGlobe_API\nssm.exe`) |
+| Tables | `PR2PO.dbo.ODATA_PR` (PR_DATASet, key Banfn+Bnfpo) · `PR2PO.dbo.ODATA_PO` (PO_DATASet, key Ebeln+Ebelp) |
+| History | `SAP_PR` / `SAP_PO` = frozen copy of the old .33 mirror (last PR 21-Jul-2026) |
+| Cadence | last 10 days every 5 min · full re-scan from `VG_ODATA_BACKFILL_START` (2025-04-01) hourly |
+| Settings | service env (NSSM `AppEnvironmentExtra`): `VG_ODATA_USER`, `VG_ODATA_PASSWORD`, `VG_ODATA_BACKFILL_START`, `VG_ODATA_ENTITIES` — never in the repo |
+| Health | `http://192.168.66.28:5002/pr2po/health` → `odata_source: ok`, `sync.loop.last_error: null` |
+
+Tools (run in `C:\VendorGlobe_API`, with the VG_ODATA_* vars set in the window):
+
+```powershell
+.\python312\python.exe app\odata_sync.py --probe   # test login, list entity sets
+.\python312\python.exe app\odata_sync.py --once    # create DB/tables + one full load
+```
+
+| Symptom | Meaning | Fix |
+|---|---|---|
+| `HTTP 401` | SAP rejected the login (password changed/expired, user locked) | reset in SU01, then update `VG_ODATA_PASSWORD` in the service env and restart |
+| `HTTP 403` | login OK, no S_SERVICE for the service | ABAPer: role with S_SERVICE for ZMM_PURCHASE_DASHBOARD_SRV |
+| Banner "SAP sync failing" | `/pr2po/health` → `sync.loop.last_error` says why | as above |
+
+The old .33 mirror loop (`sap_sync`) is off; set `VG_SAP_SYNC_ENABLED=1` only if a SAP BI source returns.
+
 ## 2. Daily operation
 
 Nothing is required daily. The service self-runs and NSSM auto-restarts it on
