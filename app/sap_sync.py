@@ -46,6 +46,11 @@ SAP_DB_USER = _env("SAP_DB_USER", "")
 SAP_DB_PASSWORD = _env("SAP_DB_PASSWORD", "")
 PR2PO_DB_NAME = _env("PR2PO_DB_NAME", "PR2PO")
 SAP_SYNC_INTERVAL_SECONDS = int(_env("SAP_SYNC_INTERVAL_SECONDS", "300"))
+# SWDBIDB on .33 was erased (new server holds only etimetracklite) - the
+# mirror is retired by default; SAP_PR / SAP_PO rows on .28 stay as history
+# and live SAP data comes from odata_sync. Set VG_SAP_SYNC_ENABLED=1 only
+# if a SAP BI source is ever restored.
+ENABLED = _env("SAP_SYNC_ENABLED", "0") == "1"
 
 # [local column, source column, SQL type] -- typed mirrors, not NVARCHAR(MAX):
 # the source schema is known and stable (SAP BI extract).

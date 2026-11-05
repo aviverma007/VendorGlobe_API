@@ -345,39 +345,73 @@ def _query_vg(startdate, enddate, epr_set):
         conn.close()
 
 
+def _newest(cur, table, cols):
+    """(newest date string, age in days) over the first existing column."""
+    cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?", table)
+    have = {r[0].lower(): r[0] for r in cur.fetchall()}
+    col = next((have[c.lower()] for c in cols if c.lower() in have), None)
+    if not col:
+        return None, None
+    # OData values are stored as text '2026-09-18 00:00:00'; mirror ones are typed
+    cur.execute(f"SELECT MAX(TRY_CAST(LEFT(CAST([{col}] AS NVARCHAR(30)), 10) AS date)) FROM [dbo].[{table}]")
+    d = cur.fetchone()[0]
+    if not d:
+        return None, None
+    return str(d), (date.today() - d).days
+
+
 def _sync_freshness():
-    """Age of the newest fetched_at per mirror table, in seconds."""
-    out = {}
+    """Freshness of every SAP table on .28 plus the live loop's heartbeat.
+    Live source = SAP OData (odata_sync); SAP_PR / SAP_PO are the retired
+    SWDBIDB mirror (history only) unless VG_SAP_SYNC_ENABLED=1."""
+    import sap_sync
+    mirror_on = getattr(sap_sync, "ENABLED", True)
+    out = {"source": "sap_bi_mirror" if mirror_on else "sap_odata"}
     try:
         conn = _connect(PR2PO_DB_NAME)
         try:
             cur = conn.cursor()
-            for t in ("SAP_PR", "SAP_PO"):
-                cur.execute(
-                    f"SELECT DATEDIFF(second, MAX(fetched_at), SYSDATETIME()), COUNT(*) "
-                    f"FROM [dbo].[{t}]"
-                )
+            cur.execute("SELECT name FROM sys.tables")
+            tables = {r[0] for r in cur.fetchall()}
+            for t in ("SAP_PR", "SAP_PO", "ODATA_PR", "ODATA_PO"):
+                if t not in tables:
+                    continue
+                cur.execute(f"SELECT DATEDIFF(second, MAX(fetched_at), SYSDATETIME()), COUNT(*) FROM [dbo].[{t}]")
                 age, n = cur.fetchone()
                 out[t] = {"rows": n, "last_sync_age_s": age}
-            # newest PR in the mirror: tells whether SAP BI itself has stopped receiving PRs
-            cur.execute("SELECT MAX([Erdat]), DATEDIFF(day, MAX([Erdat]), CAST(SYSDATETIME() AS date)) FROM [dbo].[SAP_PR]")
-            newest, newest_age = cur.fetchone()
-            out["SAP_PR"]["newest_pr_date"] = str(newest) if newest else None
-            out["SAP_PR"]["newest_pr_age_days"] = newest_age
+            # newest PR across the live table and the history mirror (Badat = PR date)
+            best = (None, None, None)
+            for t in ("ODATA_PR", "SAP_PR"):
+                if t in tables:
+                    d, a = _newest(cur, t, ("Badat", "Erdat"))
+                    if d and (best[0] is None or d > best[0]):
+                        best = (d, a, t)
+            if "ODATA_PO" in tables:
+                d, a = _newest(cur, "ODATA_PO", ("Badat", "Aedat"))
+                out["ODATA_PO"].update({"newest_po_date": d, "newest_po_age_days": a})
+            # the banner reads SAP_PR.newest_pr_*: keep that shape, say where it came from
+            out.setdefault("SAP_PR", {"rows": 0, "last_sync_age_s": None})
+            out["SAP_PR"].update({"newest_pr_date": best[0], "newest_pr_age_days": best[1], "newest_pr_from": best[2]})
+            out["pr_live"] = "ODATA_PR" in tables
         finally:
             conn.close()
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)
-    # the mirror loop's own heartbeat (sap_sync.STATUS) — the true "synced X ago"
+    # heartbeat of whichever loop is live — the true "synced X ago"
     try:
-        import sap_sync
         from datetime import datetime as _dt
-        st = sap_sync.STATUS
+        if mirror_on:
+            st = sap_sync.STATUS
+        else:
+            import odata_sync
+            st = odata_sync.STATUS
         now = _dt.now()
         age = lambda t: int((now - t).total_seconds()) if t else None   # noqa: E731
         out["loop"] = {
-            "running": st["running"], "last_ok_age_s": age(st["last_ok"]), "last_run_age_s": age(st["last_run"]),
-            "last_error": st["last_error"], "last_error_age_s": age(st["last_error_at"]), "results": st["results"],
+            "name": "sap_sync" if mirror_on else "odata_sync",
+            "running": st.get("running"), "last_ok_age_s": age(st.get("last_ok")), "last_run_age_s": age(st.get("last_run")),
+            "last_full_ok_age_s": age(st.get("last_full_ok")),
+            "last_error": st.get("last_error"), "last_error_age_s": age(st.get("last_error_at")), "results": st.get("results"),
         }
     except Exception as e:  # noqa: BLE001
         out["loop"] = {"running": False, "error": str(e)}
@@ -398,19 +432,27 @@ def register(app):
     def pr2po_health():
         import pyodbc
         status = {"pr2po_db": None, "vg_db": None, "sap_source": None,
-                  "sync": _sync_freshness()}
+                  "odata_source": None, "sync": _sync_freshness()}
         for key, db in (("pr2po_db", PR2PO_DB_NAME), ("vg_db", cfg.DB_NAME)):
             try:
                 _connect(db).close()
                 status[key] = "ok"
             except Exception as e:  # noqa: BLE001
                 status[key] = f"error: {e}"
+        if getattr(sap_sync, "ENABLED", True):
+            try:
+                c = pyodbc.connect(sap_sync._sap_connection_string(), timeout=5)
+                c.close()
+                status["sap_source"] = "ok"
+            except Exception as e:  # noqa: BLE001
+                status["sap_source"] = f"error: {e}"
+        else:
+            status["sap_source"] = "retired (SWDBIDB erased) - SAP_PR/SAP_PO kept as history"
         try:
-            c = pyodbc.connect(sap_sync._sap_connection_string(), timeout=5)
-            c.close()
-            status["sap_source"] = "ok"
+            import odata_sync
+            status["odata_source"] = odata_sync.ping()
         except Exception as e:  # noqa: BLE001
-            status["sap_source"] = f"error: {e}"
+            status["odata_source"] = f"error: {e}"
         ok = status["pr2po_db"] == "ok" and status["vg_db"] == "ok"
         return jsonify({"ok": ok, **status})
 

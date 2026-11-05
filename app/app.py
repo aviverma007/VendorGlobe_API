@@ -1033,7 +1033,9 @@ if __name__ == "__main__":
     else:
         print(f"[nfa_tat_writer] Not available ({_NFATAT_WRITER_IMPORT_ERROR})")
 
-    if _SAP_SYNC_AVAILABLE:
+    if _SAP_SYNC_AVAILABLE and not getattr(sap_sync, "ENABLED", True):
+        print("[sap_sync] retired (SWDBIDB erased) - SAP_PR/SAP_PO kept as history; live SAP data via odata_sync")
+    elif _SAP_SYNC_AVAILABLE:
         try:
             sap_sync.start_background_thread()
         except Exception as e:
