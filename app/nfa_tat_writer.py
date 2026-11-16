@@ -263,19 +263,38 @@ def init():
 
 
 def run_forever(interval_seconds=None):
+    """Rolling window every cycle (fast) plus a FULL re-scan of every month
+    since NFATAT_FULL_START every NFATAT_FULL_EVERY cycles (default hourly)
+    and once at start-up. Without the full re-scan, a PR that changes after
+    it has left the rolling window (returned, merged into another eNFA,
+    NFA approved late) is never refreshed and the dashboard keeps showing
+    its old state."""
     interval = interval_seconds or cfg.NFATAT_WRITE_INTERVAL_SECONDS
+    full_start = os.environ.get("VG_NFATAT_FULL_START", "2025-04-01").strip()
+    full_every = max(1, int(os.environ.get("VG_NFATAT_FULL_EVERY", "12")))
     init()
     print(f"[nfa_tat_writer] Upserting to {cfg.DB_SERVER}/{cfg.DB_NAME}.dbo.{cfg.NFATAT_TABLE_NAME} "
-          f"every {interval}s (one row per {KEY_COLUMN}, rolling {cfg.NFATAT_ROLLING_DAYS}-day window)")
+          f"every {interval}s (one row per {KEY_COLUMN}, rolling {cfg.NFATAT_ROLLING_DAYS}-day window; "
+          f"full re-scan from {full_start or 'off'} every {full_every} cycles)")
+    cycle = 0
     while True:
         try:
-            ins, upd, same = fetch_and_store()
-            if ins or upd:
-                startdate, enddate = _current_window()
-                print(f"[nfa_tat_writer] {datetime.now().strftime('%H:%M:%S')} "
-                      f"+{ins} new, ~{upd} updated, {same} unchanged ({startdate} to {enddate})")
+            if full_start and cycle % full_every == 0:
+                res = backfill(full_start)
+                ins = sum(r.get("inserted", 0) for r in res)
+                upd = sum(r.get("updated", 0) for r in res)
+                errs = sum(1 for r in res if "error" in r)
+                print(f"[nfa_tat_writer] {datetime.now().strftime('%H:%M:%S')} full re-scan: "
+                      f"+{ins} new, ~{upd} updated" + (f", {errs} window errors" if errs else ""))
+            else:
+                ins, upd, same = fetch_and_store()
+                if ins or upd:
+                    startdate, enddate = _current_window()
+                    print(f"[nfa_tat_writer] {datetime.now().strftime('%H:%M:%S')} "
+                          f"+{ins} new, ~{upd} updated, {same} unchanged ({startdate} to {enddate})")
         except Exception as e:
             print(f"[nfa_tat_writer] ERROR: {e}")
+        cycle += 1
         time.sleep(interval)
 
 
