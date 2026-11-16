@@ -176,6 +176,9 @@ def _load_odata_pr(startdate, enddate, extra_prs):
                 slim = {c: row.get(ci.get(c.lower(), "")) for c in SAP_PR_COLS}
                 slim["Banfn"] = banfn
                 slim["SRC"] = "odata"
+                # SAP processing status of the PR (EBAN-BANPR once the ABAPer maps it):
+                # 08 = rejected in the release strategy, 05 = release completed
+                slim["Procstat"] = row.get(ci.get("procstat", ""))
                 # SAP stopped returning this row -> deleted in SAP (inferred)
                 slim["GONE"] = "1" if row.get(ci.get("missing_since", "")) else "0"
                 out.append(slim)
