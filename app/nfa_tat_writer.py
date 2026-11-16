@@ -123,9 +123,11 @@ def normalize_rows(data):
 
 
 def _current_window():
-    end = datetime.now().date()
-    start = end - timedelta(days=cfg.NFATAT_ROLLING_DAYS)
-    return start.isoformat(), end.isoformat()
+    # QMS treats enddate as EXCLUSIVE (it compares against 00:00 of that
+    # day), so ask for tomorrow to include everything created today.
+    today = datetime.now().date()
+    start = today - timedelta(days=cfg.NFATAT_ROLLING_DAYS)
+    return start.isoformat(), (today + timedelta(days=1)).isoformat()
 
 
 def _load_existing(conn, data_columns):
@@ -242,7 +244,9 @@ def backfill(start_date):
         nxt = (cur.replace(day=1) + timedelta(days=32)).replace(day=1)
         wend = min(nxt - timedelta(days=1), today)
         try:
-            ins, upd, same = fetch_and_store(cur.isoformat(), wend.isoformat(), timeout=120)
+            # enddate is exclusive at QMS: pass the day AFTER the window's last
+            # day, or PRs created on the last day of each month are never fetched
+            ins, upd, same = fetch_and_store(cur.isoformat(), (wend + timedelta(days=1)).isoformat(), timeout=120)
             results.append({"window": f"{cur} to {wend}", "inserted": ins,
                             "updated": upd, "unchanged": same})
             print(f"[nfatat backfill] {cur} to {wend}: +{ins} new, ~{upd} updated")
