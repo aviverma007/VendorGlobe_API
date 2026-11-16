@@ -48,6 +48,8 @@ VG_COLS = [
     "PR_Pending_With", "PR_Pending_Since",
     "Validator_One", "Validator_One_Date", "Validator_Two", "Validator_Two_Date",
     "CP_Team", "CP_Team_Date", "PR_Assigners", "Assignee_Team_Date",
+    "assignee_name", "cp_name", "recomender_name", "final_approver_name",
+    "CP_Team_Msg", "Assignee_Team_Msg",
     "NFA_No", "ENFA_No", "NFA_Created_Date", "Submitted_Date", "ENFA_Date",
     "nfa_status", "NFA_Status_Desc", "NFA_Pending_With", "NFA_Pending_Since",
     "Level_One_Team", "Level_One_Date", "Level_Two_Team", "Level_Two_Date",

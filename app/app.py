@@ -271,7 +271,7 @@ async function load(){
     for(const [k,v] of Object.entries(FIXED_FILTERS)) rows = rows.filter(r => String(r[k]??'').trim().toLowerCase() === v.toLowerCase());
     rawRows = rows;
     if(rows.length){
-      const PREF=['PR_No','EPR_No','Banfn','Bnfpo','Badat','Ebeln','Ebelp','Bedat','Txz01','Name1','Netwr','Waers','Menge','Meins','Netpr','Frgkz','Frgzu','Frgke','Statu','Procstat','Loekz','PlantDesc','Plant_Desc','Werks','Eknam','Ekgrp','Afnam','Ernam','Aedat'];
+      const PREF=['PR_No','EPR_No','PRH_Status_Desc','PR_Pending_With','PR_Pending_Since','assignee_name','cp_name','recomender_name','final_approver_name','NFA_Status_Desc','NFA_Pending_With','Banfn','Bnfpo','Badat','Ebeln','Ebelp','Bedat','Txz01','Name1','Netwr','Waers','Menge','Meins','Netpr','Frgkz','Frgzu','Frgke','Statu','Procstat','Loekz','PlantDesc','Plant_Desc','Werks','Eknam','Ekgrp','Afnam','Ernam','Aedat'];
       columns = ONLY_COLS.length ? ONLY_COLS.filter(c=>c in rows[0])
         : Object.keys(rows[0]).sort((a,b)=>{
             const ia=PREF.indexOf(a), ib=PREF.indexOf(b);
