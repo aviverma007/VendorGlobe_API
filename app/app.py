@@ -186,6 +186,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   tbody tr:nth-child(even) { background:#f8fafc; }
   tbody tr:hover { background:#dbeafe; }
 </style>
+    <!-- IT Manager usage tracking: visits, pages, minutes (fails silently if IT Manager is offline) -->
+    <script async src="http://192.168.66.28:4000/track.js" data-app="VENDORGLOBE"></script>
 </head>
 <body>
 <div class="bar">
