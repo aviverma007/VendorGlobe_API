@@ -49,6 +49,7 @@ VG_COLS = [
     "Validator_One", "Validator_One_Date", "Validator_Two", "Validator_Two_Date",
     "CP_Team", "CP_Team_Date", "PR_Assigners", "Assignee_Team_Date",
     "assignee_name", "cp_name", "recomender_name", "final_approver_name",
+    "Account_Assignment_Id",
     "CP_Team_Msg", "Assignee_Team_Msg",
     "NFA_No", "ENFA_No", "NFA_Created_Date", "Submitted_Date", "ENFA_Date",
     "nfa_status", "NFA_Status_Desc", "NFA_Pending_With", "NFA_Pending_Since",
@@ -179,6 +180,8 @@ def _load_odata_pr(startdate, enddate, extra_prs):
                 # SAP processing status of the PR (EBAN-BANPR once the ABAPer maps it):
                 # 08 = rejected in the release strategy, 05 = release completed
                 slim["Procstat"] = row.get(ci.get("procstat", ""))
+                # account assignment category: P (WBS) / Q (project stock) = project, K / A / ... = non-project
+                slim["Knttp"] = row.get(ci.get("knttp", ""))
                 # SAP stopped returning this row -> deleted in SAP (inferred)
                 slim["GONE"] = "1" if row.get(ci.get("missing_since", "")) else "0"
                 out.append(slim)
