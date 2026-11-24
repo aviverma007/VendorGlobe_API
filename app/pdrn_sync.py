@@ -5,7 +5,8 @@ SAP side: read-only SICF service /sap/zpdrn (class ZCL_PDRN_JSON_HANDLER, transp
 which runs report ZRSD_PROPERTY_DETAIL_REPORT and returns its ALV table (143 fields) as JSON.
 
 Every run (default 13:00 and 17:00 server time):
-  1. GET /sap/zpdrn once per company (status=all, the report's "All" radio button).
+  1. GET /sap/zpdrn once per PROJECT (VG_PDRN_WERKS; status=all = the report's "All" radio button).
+     Small calls keep each one under SAP's ICM processing timeout (Production default 10 min).
   2. Checks: every company answers with rows, Booking Status (BUKST) is ACTIVE / CANCELLED only,
      active bookings >= VG_PDRN_MIN_RATIO of the last good load.  Any failure -> the table is NOT
      touched (the last good snapshot stays) and the reason is logged in SAP_PDRN_LOAD.
@@ -97,7 +98,7 @@ LOCAL_ADDRS = {"127.0.0.1", "::1", "localhost"}
 _lock = threading.Lock()
 STATUS = {"configured": False, "running": False, "last_run": None, "last_ok": None,
           "last_rows": None, "last_active": None, "last_error": None, "next_run": None,
-          "companies": None}
+          "companies": None, "progress": None}
 
 
 def _log(msg):
@@ -240,10 +241,11 @@ def _log_end(load_id, ok, rows_n, active_n, message):
 
 # ---------------- SAP ----------------
 
-def _fetch_company(s, bukrs):
+def _fetch_company(s, bukrs, werks=None):
+    """One service call. bukrs = company code(s) (comma list), werks = project(s) or None."""
     params = {"bukrs": bukrs, "status": s["status"], "saml2": "disabled"}
-    if s["werks"] != "*":
-        params["werks"] = s["werks"]
+    if werks:
+        params["werks"] = werks
     if s["client"]:
         params["sap-client"] = s["client"]
     if not s["verify"]:
@@ -263,6 +265,7 @@ def _fetch_company(s, bukrs):
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
     if r.text.lstrip()[:1] != "{":
         raise RuntimeError("SAP returned a web page instead of JSON (login page?)")
+    # (a "500 Connection Timed Out" above = SAP's ICM gave up; raise PROCTIMEOUT on the port)
     ans = r.json()
     rows = ans.get("rows", ans.get("ROWS"))
     if not isinstance(rows, list):
@@ -291,12 +294,19 @@ def run_once(trigger="manual", check_only=False):
             ensure_schema()
             load_id = _log_start(trigger, s["bukrs"])
         parts = []
-        for b in s["bukrs"]:
-            rows, secs = _fetch_company(s, b)
+        # one call per PROJECT (smaller calls stay under SAP's ICM timeout); "*" = per company
+        if s["werks"] != "*":
+            calls = [(",".join(s["bukrs"]), w.strip(), f"project {w.strip()}")
+                     for w in s["werks"].split(",") if w.strip()]
+        else:
+            calls = [(b, None, f"company {b}") for b in s["bukrs"]]
+        for bukrs, werks, label in calls:
+            STATUS["progress"] = f"{label} ({len(parts) + 1}/{len(calls)})"
+            rows, secs = _fetch_company(s, bukrs, werks)
             if not rows:
-                raise RuntimeError(f"company {b}: SAP returned 0 rows - not loading")
-            parts.append(f"{b}:{len(rows)} ({secs:.0f}s)")
-            _log(f"company {b}: {len(rows)} rows in {secs:.0f}s")
+                raise RuntimeError(f"{label}: SAP returned 0 rows - not loading")
+            parts.append(f"{label.split()[-1]}:{len(rows)} ({secs:.0f}s)")
+            _log(f"{label}: {len(rows)} rows in {secs:.0f}s")
             rows_all.extend(rows)
         bad = {str(r.get("BUKST") or "").strip() for r in rows_all} - {"ACTIVE", "CANCELLED"}
         if bad:
@@ -328,6 +338,7 @@ def run_once(trigger="manual", check_only=False):
         return {"ok": False, "message": err}
     finally:
         STATUS["running"] = False
+        STATUS["progress"] = None
         _lock.release()
 
 
