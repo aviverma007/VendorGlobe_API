@@ -205,3 +205,26 @@ overlap), so downtime self-heals.
   force a cycle with `/sfdc/digital/sync` (`?reset=1` = full re-backfill from
   `VG_SFDC_NQ_BACKFILL_START`, default 2026-04-01). Same for `/sfdc/footfall/*`.
 * Restart the service after `git pull` — no new pip packages needed.
+
+## PDRN bookings from SAP -> SQL (server .28)
+
+`app/pdrn_sync.py` loads the ZSD_PDRN report (SICF service `/sap/zpdrn`, transport DS4K913636) from
+SAP Production into SQL Server at **13:00 and 17:00**:
+
+| Table | Content |
+|---|---|
+| `PDRN.dbo.SAP_PDRN` | current snapshot: every ZSD_PDRN field (BUKRS, WNAME, MATNR, BUKST, ZFM_REC_TAX_SKY ...) as text, plus LOAD_ID / LOADED_AT |
+| `PDRN.dbo.SAP_PDRN_LOAD` | one row per run: started, finished, OK, rows, active, message |
+
+- The snapshot is replaced in one transaction, and only after the checks pass (every company
+  returns rows, Booking Status ACTIVE/CANCELLED, active bookings >= 90 % of the last load).
+  A failed run leaves the last good snapshot and writes the reason to `SAP_PDRN_LOAD`.
+- SAP login: `C:\VendorGlobe_API\pdrn.env` (copy `pdrn.env.example`; git-ignored). Read on
+  every run, so a new password needs no restart.
+- Routes: `/pdrn/health` (status, last loads), `/pdrn/rows` (snapshot; this server only),
+  `/pdrn/refresh` (load now; this server only).
+- The dashboard (DASHBOARD_SWD `scripts/refresh_pdrn_live.ps1`, every 10 min 13:10-19:10) reads
+  `/pdrn/rows` and rebuilds only when there is a new load.
+
+Setup: create `pdrn.env`, `git pull`, `Restart-Service VendorGlobeAPI`, open
+`http://localhost:5002/pdrn/refresh` on the server for the first load, then check `/pdrn/health`.

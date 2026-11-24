@@ -63,6 +63,16 @@ pr2po.register(app)
 import collections_dash  # noqa: E402
 collections_dash.register(app)
 
+# PDRN bookings (ZSD_PDRN) from SAP Production -> SQL PDRN.dbo.SAP_PDRN at 13:00 / 17:00
+# (/pdrn/health, /pdrn/rows for the dashboard refresh on this server, /pdrn/refresh)
+try:
+    import pdrn_sync  # noqa: E402
+    pdrn_sync.register(app)
+    _PDRN_SYNC_AVAILABLE = True
+except Exception as _e6:
+    _PDRN_SYNC_AVAILABLE = False
+    _PDRN_SYNC_IMPORT_ERROR = _e6
+
 # Salesforce Case delta sync (/sfdc/cases/health, /sfdc/cases/sync)
 try:
     import sfdc_case_sync  # noqa: E402
@@ -1069,6 +1079,14 @@ if __name__ == "__main__":
             print(f"[sfdc_named_sync] Failed to start: {e}")
     else:
         print(f"[sfdc_named_sync] Not available ({_SFDC_NQ_IMPORT_ERROR})")
+
+    if _PDRN_SYNC_AVAILABLE:
+        try:
+            pdrn_sync.start_background_thread()
+        except Exception as e:
+            print(f"[pdrn_sync] Failed to start: {e}")
+    else:
+        print(f"[pdrn_sync] Not available ({_PDRN_SYNC_IMPORT_ERROR})")
 
     print(f"Serving live PR report on http://localhost:{PORT}")
     try:
