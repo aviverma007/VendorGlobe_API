@@ -541,23 +541,11 @@ def _pr2po_rows(table_name, order_col="fetched_at"):
         conn.close()
 
 
-def _line_deleted(r):
-    v = r.get("Loekz") if "Loekz" in r else r.get("LOEKZ")
-    return str(v or "").strip().lower() in ("x", "l", "1", "true")
-
-
-def _drop_fully_deleted_prs(rows):
-    """Business rule: a PR whose EVERY line item is deleted in SAP is hidden
-    completely. A PR with only some lines deleted stays, with all its lines."""
-    live = {str(r.get("Banfn") or r.get("BANFN") or "") for r in rows if not _line_deleted(r)}
-    return [r for r in rows if str(r.get("Banfn") or r.get("BANFN") or "") in live]
-
-
 @app.route("/db/sappr")
 def db_sappr():
     """Live SAP PR lines (ODATA_PR, synced every 5 min from SAP OData)."""
     try:
-        rows = _drop_fully_deleted_prs(_pr2po_rows("ODATA_PR"))
+        rows = _pr2po_rows("ODATA_PR")
         return jsonify({"ok": True, "rows": rows, "count": len(rows), "source": "odata"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 200
