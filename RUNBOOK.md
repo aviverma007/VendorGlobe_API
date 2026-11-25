@@ -206,7 +206,14 @@ overlap), so downtime self-heals.
   `VG_SFDC_NQ_BACKFILL_START`, default 2026-04-01). Same for `/sfdc/footfall/*`.
 * Restart the service after `git pull` — no new pip packages needed.
 
-## PDRN bookings from SAP -> SQL (server .28)
+## PDRN bookings + INVR inventory from SAP -> SQL (server .28)
+
+Same engine for both (`app/pdrn_sync.py`): each scheduled run loads **INVR first, then PDRN**.
+INVR (`/sap/zinvr`, ZSD_INVR / ZSDR_UNIT, package ZINVR_LIVE) -> `PDRN.dbo.SAP_INVR` (+ `SAP_INVR_LOAD`)
+is **off until it is in Production**: then set `VG_INVR_ENABLED=1` in `pdrn.env` and restart the
+service (empty table -> first load at once). Routes `/invr/health`, `/invr/rows`, `/invr/refresh`.
+
+### PDRN
 
 `app/pdrn_sync.py` loads the ZSD_PDRN report (SICF service `/sap/zpdrn`, transport DS4K913636) from
 SAP Production into SQL Server at **13:00 and 17:00**:
