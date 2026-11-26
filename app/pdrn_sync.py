@@ -42,7 +42,7 @@ values there win). Read on every run, so a new password needs no restart.
   PDRN:    VG_PDRN_URL, VG_PDRN_BUKRS (1010,1070,2010,2070,3070), VG_PDRN_WERKS (8 projects),
            VG_PDRN_STATUS (all)
   INVR:    VG_INVR_ENABLED (0 - set 1 once /sap/zinvr is in Production), VG_INVR_URL,
-           VG_INVR_CLIENT, VG_INVR_WERKS (8 projects), VG_INVR_TYPE (units),
+           VG_INVR_CLIENT, VG_INVR_WERKS (8 projects), VG_INVR_TYPE (units,transit),
            VG_INVR_USER / VG_INVR_PASSWORD (default: the PDRN login)
   ZREC:    VG_ZREC_ENABLED (1), VG_ZREC_BUKRS (1010,1070,2010,2070,3070), VG_ZREC_FROM (2015-01-01)
   ZDAPP:   VG_ZDAPP_ENABLED (1), VG_ZDAPP_BUKRS (same 5 companies), VG_ZDAPP_VIEWS (due,undue)
@@ -168,7 +168,10 @@ class Feed:
             s["extra"] = {"bukrs": _env("PDRN_BUKRS", "1010,1070,2010,2070,3070"),
                           "status": _env("PDRN_STATUS", "all")}
         elif k == "invr":
-            s["extra"] = {"type": _env("INVR_TYPE", "units")}
+            # ZSD_INVR "Unit" + "In Transit" (a cancelled unit waiting to be released is still stock,
+            # e.g. Sky Arc TB-2704) - project totals = both; "Parking" is not a unit
+            s["types"] = _env("INVR_TYPE", "units,transit")
+            s["extra"] = {}
         elif k == "zrec":
             s["companies"] = _env("ZREC_BUKRS", COMPANIES)
             s["extra"] = {"from": _env("ZREC_FROM", "2015-01-01")}
@@ -211,7 +214,10 @@ class Feed:
         k = self.key
         if k in ("pdrn", "invr"):
             ws = _csv(s["werks"]) if s["werks"] != "*" else [None]
-            return [((f"project {w}" if w else "all projects"), ({"werks": w} if w else {})) for w in ws]
+            types = _csv(s["types"]) if k == "invr" else [None]
+            return [(" ".join(x for x in ("project", w or "all", t) if x),
+                     {**({"werks": w} if w else {}), **({"type": t} if t else {})})
+                    for w in ws for t in types]
         if k == "zrec":
             # one call per company per calendar year, and per MONTH for last year and this year (the
             # busy ones - Nature's Court 2026 alone ran past the timeout); small calls stay far below
@@ -488,7 +494,7 @@ def run_feed(key, trigger="manual", check_only=False):
         for i, (label, call) in enumerate(plan, 1):
             st["progress"] = f"{label} ({i}/{len(plan)})"
             rows, secs = _fetch(f, s, call)
-            if not rows and not f.allow_empty:
+            if not rows and not (f.allow_empty or call.get("type") == "transit"):   # most have none
                 raise RuntimeError(f"{label}: SAP returned 0 rows - not loading")
             for r in rows:              # which call a row came from (company / view / project)
                 r["CALL_KEY"] = label.split(" ", 1)[-1]
