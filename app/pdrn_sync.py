@@ -48,7 +48,8 @@ values there win). Read on every run, so a new password needs no restart.
   ZDAPP:   VG_ZDAPP_ENABLED (1), VG_ZDAPP_BUKRS (same 5 companies), VG_ZDAPP_VIEWS (due,undue)
   ZALR_NP: VG_ZALR_NP_ENABLED (1), VG_ZALR_NP_VIEWS (np_po,np_summary,np_total_actual),
            VG_ZALR_NP_PSPHI (the 46 Non-Project definitions in NP_DEFS), VG_ZALR_NP_BATCH (5 per call),
-           VG_ZALR_NP_YEARS (current fiscal year, e.g. 2026 = FY 2026-27; "2025-2026" for two)
+           VG_ZALR_NP_WBS (*F26* = WBS of the current fiscal year, moves on every April),
+           VG_ZALR_NP_YEARS (optional extra posting-year filter, off by default)
   ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition except the
            Non-Project ones above, or a comma list), VG_ZALR_PJ_EXTRA (RE0111 - projects that carry
            the Non-Project budget profile in PRD, always included)
@@ -180,7 +181,11 @@ class Feed:
             s["batch"] = int(_env("ZALR_NP_BATCH", "5"))    # definitions per SAP call
             # Non-Project WBS are per fiscal year (…-F26-…): load the CURRENT fiscal year only, as the
             # manual FY exports did (it moves to the next year by itself every April)
-            s["extra"] = {"year": _env("ZALR_NP_YEARS", str(_fy_start_year()))}
+            # the manual FY exports = the WBS of that fiscal year ("…-F26-…"), all their postings;
+            # a year filter is added only when VG_ZALR_NP_YEARS is set
+            s["extra"] = {"wbs": _env("ZALR_NP_WBS", f"*F{_fy_start_year() % 100:02d}*")}
+            if _env("ZALR_NP_YEARS"):
+                s["extra"]["year"] = _env("ZALR_NP_YEARS")
         elif k == "zalr_pj":
             s["psphi"] = _env("ZALR_PJ_PSPHI", "*")
             s["extra"] = {}
@@ -194,7 +199,9 @@ class Feed:
         if self.key == "zdapp":
             return f"companies {s['companies']} · {s['views']}"
         if self.key == "zalr_np":
-            return f"{s['views']} · years {s['extra']['year']} · {len(_np_defs())} definitions"
+            return (f"{s['views']} · WBS {s['extra']['wbs']}"
+                    + (f" · years {s['extra']['year']}" if "year" in s["extra"] else "")
+                    + f" · {len(_np_defs())} definitions")
         if self.key == "zalr_pj":
             return "project definitions " + s["psphi"]
         return s["werks"]
