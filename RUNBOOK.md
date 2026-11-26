@@ -235,3 +235,21 @@ SAP Production into SQL Server at **13:00 and 17:00**:
 
 Setup: create `pdrn.env`, `git pull`, `Restart-Service VendorGlobeAPI`, open
 `http://localhost:5002/pdrn/refresh` on the server for the first load, then check `/pdrn/health`.
+
+## ZREC, ZALR and ZSD_DAPP from SAP -> SQL (server .28) — since 26-Nov-2026
+
+Same engine as PDRN/INVR (`app/pdrn_sync.py`), same 13:00 / 17:00 schedule, same checks, ON by default:
+
+| Feed | Calls per run | SQL table (DB PDRN) | Dashboard page |
+|---|---|---|---|
+| `zrec` | `/sap/zrec` once per company (1010, 1070, 2010, 2070, 3070), receipts since 2015 | SAP_ZREC | SAP Collections, EOI |
+| `zdapp` | `/sap/zdapp` per company × Due and Undue | SAP_ZDAPP | Due / Undue |
+| `zalr_np` | `/sap/zalr` np_po, np_summary, np_total_actual, psphi=*, years 2024-<current FY> | SAP_ZALR_NP | Cost → Non-Project |
+| `zalr_pj` | `view=projlist`, then `view=project` per Project definition | SAP_ZALR_PJ | Cost → Project |
+
+- Every row carries `CALL_KEY` (company / view / project definition / "1010 due").
+- Health: `http://192.168.66.28:5002/<feed>/health`; load now (on the server): `/<feed>/refresh`.
+- Turn one off: `VG_<FEED>_ENABLED=0` in `pdrn.env`, e.g. `VG_ZALR_PJ_ENABLED=0`. Change scope:
+  `VG_ZREC_BUKRS`, `VG_ZDAPP_BUKRS`, `VG_ZALR_NP_YEARS`, `VG_ZALR_PJ_PSPHI` (comma list instead of *).
+- A call that runs past SAP's ICM timeout shows `HTTP 500 Connection Timed Out` in `<TABLE>_LOAD`:
+  check PROCTIMEOUT on port 20400 (RZ10, permanent) before anything else.

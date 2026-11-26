@@ -6,6 +6,14 @@ SAP reports -> SQL Server, twice a day (13:00 and 17:00 server time). One engine
   invr  /sap/zinvr  ZCL_INVR_JSON_HANDLER  ZSDR_UNIT (ZSD_INVR), units          SAP_INVR + SAP_INVR_LOAD
   pdrn  /sap/zpdrn  ZCL_PDRN_JSON_HANDLER  ZRSD_PROPERTY_DETAIL_REPORT          SAP_PDRN + SAP_PDRN_LOAD
                                            (ZSD_PDRN)
+  zrec     /sap/zrec   ZCL_ZREC_JSON_HANDLER  ZSD_REC_PRINT_NEW (ZREC_PRINT)     SAP_ZREC    (per company)
+  zdapp    /sap/zdapp  ZCL_DAPP_JSON_HANDLER  ZSDR_DUE_PAYMENT (ZSD_DAPP)        SAP_ZDAPP   (per company,
+                                           Due and Undue separately - CALL_KEY "1010 due")
+  zalr_np  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Non-Project      SAP_ZALR_NP (per view:
+                                           Item Wise PO, Summary, Total Actual - FY 2024 -> now)
+  zalr_pj  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Project          SAP_ZALR_PJ (per Project
+                                           definition from view=projlist, project to date)
+  Every row also carries CALL_KEY = the company / view / project definition of the call it came from.
 
 Every scheduled run loads INVR first, then PDRN, so both snapshots come from the same moment.
 
@@ -18,7 +26,7 @@ Per feed, every run:
   3. Replaces the table in ONE transaction. Every report field is kept as text, same names as SAP
      (BUKRS, WNAME, MATNR / NAME1, MAKTX, VMSTB ...), plus LOAD_ID and LOADED_AT.
 
-Routes (per feed key = pdrn | invr):
+Routes (per feed key = pdrn | invr | zrec | zdapp | zalr_np | zalr_pj):
   /<feed>/health    last load, row count, next run, recent loads (no customer data)
   /<feed>/rows      the snapshot as JSON {asOn, loadId, count, rows} - this server only (127.0.0.1)
                     or header X-PDRN-Token = VG_PDRN_API_TOKEN
@@ -34,9 +42,15 @@ values there win). Read on every run, so a new password needs no restart.
   INVR:    VG_INVR_ENABLED (0 - set 1 once /sap/zinvr is in Production), VG_INVR_URL,
            VG_INVR_CLIENT, VG_INVR_WERKS (8 projects), VG_INVR_TYPE (units),
            VG_INVR_USER / VG_INVR_PASSWORD (default: the PDRN login)
+  ZREC:    VG_ZREC_ENABLED (1), VG_ZREC_BUKRS (1010,1070,2010,2070,3070), VG_ZREC_FROM (2015-01-01)
+  ZDAPP:   VG_ZDAPP_ENABLED (1), VG_ZDAPP_BUKRS (same 5 companies), VG_ZDAPP_VIEWS (due,undue)
+  ZALR_NP: VG_ZALR_NP_ENABLED (1), VG_ZALR_NP_VIEWS (np_po,np_summary,np_total_actual),
+           VG_ZALR_NP_PSPHI (*), VG_ZALR_NP_YEARS (2024-<current fiscal year>)
+  ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition, or a comma list)
+  Any feed: VG_<FEED>_URL / _CLIENT / _TIMEOUT / _MIN_RATIO / _USER / _PASSWORD override the shared value.
 
-Standalone:  python app\\pdrn_sync.py --once [pdrn|invr]     (load now; default both)
-             python app\\pdrn_sync.py --check [pdrn|invr]    (fetch + check, write nothing)
+Standalone:  python app\\pdrn_sync.py --once [feed ...]     (load now; default all enabled)
+             python app\\pdrn_sync.py --check [feed ...]    (fetch + check, write nothing)
 """
 
 import os
@@ -98,16 +112,27 @@ def _log(msg):
 
 # ---------------- feeds ----------------
 
+def _fy_start_year(d=None):
+    """SAP fiscal year (April-March, named by its start year): Nov 2026 -> 2026, Feb 2027 -> 2026."""
+    d = d or datetime.now()
+    return d.year if d.month >= 4 else d.year - 1
+
+
+def _csv(v):
+    return [x.strip() for x in str(v or "").split(",") if x.strip()]
+
+
 class Feed:
     def __init__(self, key, report, path, table, status_field, allowed, count_where,
-                 enabled_default):
+                 enabled_default, allow_empty=False):
         self.key, self.report, self.path = key, report, path
         self.env = key.upper()
         self.table, self.log_table = table, table + "_LOAD"
-        self.status_field = status_field      # column checked on every row
+        self.status_field = status_field      # column checked on every row (None = no check)
         self.allowed = allowed                # set of allowed values, or None = any non-blank
         self.count_where = count_where        # (column, value) counted for the ratio check, None = all rows
         self.enabled_default = enabled_default
+        self.allow_empty = allow_empty        # a call may return 0 rows (a project with no postings)
         self.lock = threading.Lock()
         self.status = {"configured": False, "running": False, "last_run": None, "last_ok": None,
                        "last_rows": None, "last_counted": None, "last_error": None,
@@ -132,12 +157,65 @@ class Feed:
             "min_ratio": float(g("MIN_RATIO", "0.9")),
             "times": [t.strip() for t in _env("PDRN_TIMES", "13:00,17:00").split(",") if t.strip()],
         }
-        if self.key == "pdrn":
+        k = self.key
+        if k == "pdrn":
             s["extra"] = {"bukrs": _env("PDRN_BUKRS", "1010,1070,2010,2070,3070"),
                           "status": _env("PDRN_STATUS", "all")}
-        else:
+        elif k == "invr":
             s["extra"] = {"type": _env("INVR_TYPE", "units")}
+        elif k == "zrec":
+            s["companies"] = _env("ZREC_BUKRS", COMPANIES)
+            s["extra"] = {"from": _env("ZREC_FROM", "2015-01-01")}
+        elif k == "zdapp":
+            s["companies"] = _env("ZDAPP_BUKRS", COMPANIES)
+            s["views"] = _env("ZDAPP_VIEWS", "due,undue")   # SAP's own Due / Undue radio buttons
+            s["extra"] = {}
+        elif k == "zalr_np":
+            s["views"] = _env("ZALR_NP_VIEWS", "np_po,np_summary,np_total_actual")
+            s["extra"] = {"psphi": _env("ZALR_NP_PSPHI", "*"),
+                          "year": _env("ZALR_NP_YEARS", f"2024-{_fy_start_year()}")}
+        elif k == "zalr_pj":
+            s["psphi"] = _env("ZALR_PJ_PSPHI", "*")
+            s["extra"] = {}
         return s
+
+    def scope(self, s):
+        """Text for the load log: which calls this run makes."""
+        if self.key == "zrec":
+            return "companies " + s["companies"]
+        if self.key == "zdapp":
+            return f"companies {s['companies']} · {s['views']}"
+        if self.key == "zalr_np":
+            return f"{s['views']} · years {s['extra']['year']}"
+        if self.key == "zalr_pj":
+            return "project definitions " + s["psphi"]
+        return s["werks"]
+
+    def calls(self, s):
+        """[(label, params)] - one SAP call each, small enough for SAP's ICM timeout."""
+        k = self.key
+        if k in ("pdrn", "invr"):
+            ws = _csv(s["werks"]) if s["werks"] != "*" else [None]
+            return [((f"project {w}" if w else "all projects"), ({"werks": w} if w else {})) for w in ws]
+        if k == "zrec":
+            return [(f"company {b}", {"bukrs": b}) for b in _csv(s["companies"])]
+        if k == "zdapp":
+            return [(f"company {b} {v}", {"bukrs": b, "view": v})
+                    for b in _csv(s["companies"]) for v in _csv(s["views"])]
+        if k == "zalr_np":
+            return [(f"view {v}", {"view": v}) for v in _csv(s["views"])]
+        if k == "zalr_pj":
+            if s["psphi"] != "*":
+                defs = _csv(s["psphi"])
+            else:
+                # every Project definition SAP knows (budget profile ZPSWB2 = Non-Project, skipped)
+                rows, _ = _fetch(self, s, {"view": "projlist", "psphi": "*"})
+                defs = sorted({str(r.get("PSPID") or "").strip() for r in rows
+                               if str(r.get("BPROF") or "").strip() != "ZPSWB2"} - {""})
+                if not defs:
+                    raise RuntimeError("view=projlist returned no Project definitions")
+            return [(f"project {d}", {"view": "project", "psphi": d}) for d in defs]
+        raise RuntimeError(f"no call plan for feed {k}")
 
     def counted(self, rows):
         if self.count_where is None:
@@ -146,12 +224,25 @@ class Feed:
         return sum(1 for r in rows if str(r.get(col) or "").strip() == val)
 
 
+COMPANIES = "1010,1070,2010,2070,3070"
 FEEDS = {
     "invr": Feed("invr", "ZSD_INVR", "/sap/zinvr", "SAP_INVR", "VMSTB", None, None, False),
     "pdrn": Feed("pdrn", "ZSD_PDRN", "/sap/zpdrn", "SAP_PDRN", "BUKST", {"ACTIVE", "CANCELLED"},
                  ("BUKST", "ACTIVE"), True),
+    # receipts (Collections, EOI) - one call per company, all receipts since 2015
+    "zrec": Feed("zrec", "ZREC_PRINT", "/sap/zrec", "SAP_ZREC", None, None, None, True,
+                 allow_empty=True),
+    # due / undue as per payment plan - one call per company
+    "zdapp": Feed("zdapp", "ZSD_DAPP", "/sap/zdapp", "SAP_ZDAPP", None, None, None, True,
+                  allow_empty=True),
+    # Budget vs Actual, Non-Project: Item Wise PO + Summary + Total Actual, FY 2024 -> now
+    "zalr_np": Feed("zalr_np", "ZALR", "/sap/zalr", "SAP_ZALR_NP", None, None, None, True,
+                    allow_empty=True),
+    # Budget vs Actual, Project: every Project definition, project to date
+    "zalr_pj": Feed("zalr_pj", "ZALR", "/sap/zalr", "SAP_ZALR_PJ", None, None, None, True,
+                    allow_empty=True),
 }
-ORDER = ["invr", "pdrn"]          # INVR first, then PDRN
+ORDER = ["invr", "pdrn", "zrec", "zdapp", "zalr_np", "zalr_pj"]   # INVR + PDRN first (same moment)
 STATUS = FEEDS["pdrn"].status     # kept for older callers
 
 
@@ -282,11 +373,11 @@ def _log_end(f, load_id, ok, rows_n, counted, message):
 
 # ---------------- SAP ----------------
 
-def _fetch(f, s, werks):
-    """One service call for one project. Returns (rows with UPPER-case keys, seconds)."""
+def _fetch(f, s, call):
+    """One service call (call = its own parameters). Returns (rows with UPPER-case keys, seconds)."""
     params = dict(s["extra"], saml2="disabled")
-    if werks:
-        params["werks"] = werks
+    params.update(call)
+    where = ", ".join(f"{k}={v}" for k, v in call.items()) or "all"
     if s["client"]:
         params["sap-client"] = s["client"]
     if not s["verify"]:
@@ -310,10 +401,10 @@ def _fetch(f, s, werks):
     ans = r.json()
     rows = ans.get("rows", ans.get("ROWS"))
     if not isinstance(rows, list):
-        raise RuntimeError(f"project {werks}: answer has no rows")
+        raise RuntimeError(f"{where}: answer has no rows")
     cnt = ans.get("count", ans.get("COUNT"))
     if cnt is not None and int(cnt) != len(rows):
-        raise RuntimeError(f"project {werks}: count {cnt} but {len(rows)} rows arrived")
+        raise RuntimeError(f"{where}: count {cnt} but {len(rows)} rows arrived")
     return [{str(k).upper(): v for k, v in x.items()} for x in rows], secs
 
 
@@ -330,22 +421,26 @@ def run_feed(key, trigger="manual", check_only=False):
     try:
         if not s["user"] or not s["password"]:
             raise RuntimeError("VG_PDRN_USER / VG_PDRN_PASSWORD not set (pdrn.env in the API folder)")
-        projects = ([w.strip() for w in s["werks"].split(",") if w.strip()]
-                    if s["werks"] != "*" else [None])
         if not check_only:
             ensure_schema(f)
-            load_id = _log_start(f, trigger, s["werks"])
+            load_id = _log_start(f, trigger, f.scope(s))
+        st["progress"] = "planning"
+        plan = f.calls(s)
         parts = []
-        for i, w in enumerate(projects, 1):
-            label = f"project {w}" if w else "all projects"
-            st["progress"] = f"{label} ({i}/{len(projects)})"
-            rows, secs = _fetch(f, s, w)
-            if not rows:
+        for i, (label, call) in enumerate(plan, 1):
+            st["progress"] = f"{label} ({i}/{len(plan)})"
+            rows, secs = _fetch(f, s, call)
+            if not rows and not f.allow_empty:
                 raise RuntimeError(f"{label}: SAP returned 0 rows - not loading")
-            parts.append(f"{w or '*'}:{len(rows)} ({secs:.0f}s)")
+            for r in rows:              # which call a row came from (company / view / project)
+                r["CALL_KEY"] = label.split(" ", 1)[-1]
+            parts.append(f"{label.split(' ', 1)[-1]}:{len(rows)} ({secs:.0f}s)")
             _log(f"{key} {label}: {len(rows)} rows in {secs:.0f}s")
             rows_all.extend(rows)
-        vals = {str(r.get(f.status_field) or "").strip() for r in rows_all}
+        if not rows_all:
+            raise RuntimeError("SAP returned 0 rows in total - not loading")
+        vals = ({str(r.get(f.status_field) or "").strip() for r in rows_all}
+                if f.status_field else set())
         bad = (vals - f.allowed) if f.allowed is not None else ({""} & vals)
         if bad:
             raise RuntimeError(f"unexpected {f.status_field} values {sorted(bad)} - not loading")
@@ -472,7 +567,7 @@ def register(app):
         s = f.settings()
         out = dict(f.status)
         out.update(feed=key, report=f.report, enabled=s["enabled"], source=s["url"],
-                   table=f"{DB_NAME}.dbo.{f.table}", times=s["times"], projects=s["werks"],
+                   table=f"{DB_NAME}.dbo.{f.table}", times=s["times"], projects=f.scope(s),
                    companies=s["extra"]["bukrs"].split(",") if key == "pdrn" else None)
         try:
             c = _conn()
