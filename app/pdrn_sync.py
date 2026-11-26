@@ -50,7 +50,8 @@ values there win). Read on every run, so a new password needs no restart.
            VG_ZALR_NP_PSPHI (the 46 Non-Project definitions in NP_DEFS), VG_ZALR_NP_BATCH (5 per call),
            VG_ZALR_NP_YEARS (current fiscal year, e.g. 2026 = FY 2026-27; "2025-2026" for two)
   ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition except the
-           Non-Project ones above, or a comma list)
+           Non-Project ones above, or a comma list), VG_ZALR_PJ_EXTRA (RE0111 - projects that carry
+           the Non-Project budget profile in PRD, always included)
   Any feed: VG_<FEED>_URL / _CLIENT / _TIMEOUT / _MIN_RATIO / _USER / _PASSWORD override the shared value.
 
 Standalone:  python app\\pdrn_sync.py --once [feed ...]     (load now; default all enabled)
@@ -241,8 +242,9 @@ class Feed:
                 # every Project definition SAP knows (budget profile ZPSWB2 = Non-Project, skipped)
                 rows, _ = _fetch(self, s, {"view": "projlist", "psphi": "*"})
                 np_defs = set(_np_defs())
-                defs = sorted({str(r.get("PSPID") or "").strip().replace("/", "").upper() for r in rows
-                               if str(r.get("BPROF") or "").strip() != "ZPSWB2"} - {""} - np_defs)
+                defs = sorted(({str(r.get("PSPID") or "").strip().replace("/", "").upper() for r in rows
+                                if str(r.get("BPROF") or "").strip() != "ZPSWB2"}
+                               | set(_pj_extra())) - {""} - np_defs)
                 if not defs:
                     raise RuntimeError("view=projlist returned no Project definitions")
             return [(f"project {d}", {"view": "project", "psphi": d}) for d in defs]
@@ -264,6 +266,12 @@ NP_DEFS = ("HO1000,HO2080,RE0062,RE0075,RE1040,RE1050,RE1060,RE1080,RE1090,RE111
            "RE2030,RE2040,RE2050,RE2060,RE2090,RE3000,RE3010,RE3020,RE3030,RE3040,RE3050,RE3060,RE3080,"
            "RE3090,RE4000,RE4010,RE4020,RE4030,RE4050,RE4060,RE4070,RE4080,RE4090,RE5000,RE5010,RE5020,"
            "RE5030,RE5040,RE6600,RE6700,RE6900,RE9800,REM110")
+
+
+def _pj_extra():
+    """Project definitions that carry the Non-Project budget profile in PRD but ARE projects
+    (they were in the manual Project export) - always loaded by the Project feed."""
+    return [d.replace("/", "").upper() for d in _csv(_env("ZALR_PJ_EXTRA", "RE0111"))]
 
 
 def _np_defs():
