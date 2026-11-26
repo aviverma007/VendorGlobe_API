@@ -186,7 +186,8 @@ class Feed:
     def scope(self, s):
         """Text for the load log: which calls this run makes."""
         if self.key == "zrec":
-            return f"companies {s['companies']} · one call per year from {s['extra'].get('from')}"
+            return (f"companies {s['companies']} · per year from {s['extra'].get('from')}, "
+                    f"per month for the last two years")
         if self.key == "zdapp":
             return f"companies {s['companies']} · {s['views']}"
         if self.key == "zalr_np":
@@ -202,13 +203,25 @@ class Feed:
             ws = _csv(s["werks"]) if s["werks"] != "*" else [None]
             return [((f"project {w}" if w else "all projects"), ({"werks": w} if w else {})) for w in ws]
         if k == "zrec":
-            # one call per company per calendar year (receipt posting date) - small calls that stay
-            # far below SAP's ICM timeout; a receipt falls in exactly one year, so nothing repeats
+            # one call per company per calendar year, and per MONTH for last year and this year (the
+            # busy ones - Nature's Court 2026 alone ran past the timeout); small calls stay far below
+            # SAP's ICM timeout and a receipt falls in exactly one window, so nothing repeats
+            import calendar
             start = int(str(s["extra"].get("from", "2015-01-01"))[:4])
             today = datetime.now().date()
-            return [(f"company {b} {y}", {"bukrs": b, "from": f"{y}-01-01",
-                                          "to": (f"{y}-12-31" if y < today.year else today.isoformat())})
-                    for b in _csv(s["companies"]) for y in range(start, today.year + 1)]
+            windows = []
+            for y in range(start, today.year + 1):
+                if y < today.year - 1:
+                    windows.append((str(y), f"{y}-01-01", f"{y}-12-31"))
+                    continue
+                for m in range(1, 13):
+                    if (y, m) > (today.year, today.month):
+                        break
+                    last = calendar.monthrange(y, m)[1]
+                    to = today.isoformat() if (y, m) == (today.year, today.month) else f"{y}-{m:02d}-{last}"
+                    windows.append((f"{y}-{m:02d}", f"{y}-{m:02d}-01", to))
+            return [(f"company {b} {w}", {"bukrs": b, "from": fr, "to": to})
+                    for b in _csv(s["companies"]) for w, fr, to in windows]
         if k == "zdapp":
             return [(f"company {b} {v}", {"bukrs": b, "view": v})
                     for b in _csv(s["companies"]) for v in _csv(s["views"])]
