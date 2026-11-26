@@ -6,7 +6,8 @@ SAP reports -> SQL Server, twice a day (13:00 and 17:00 server time). One engine
   invr  /sap/zinvr  ZCL_INVR_JSON_HANDLER  ZSDR_UNIT (ZSD_INVR), units          SAP_INVR + SAP_INVR_LOAD
   pdrn  /sap/zpdrn  ZCL_PDRN_JSON_HANDLER  ZRSD_PROPERTY_DETAIL_REPORT          SAP_PDRN + SAP_PDRN_LOAD
                                            (ZSD_PDRN)
-  zrec     /sap/zrec   ZCL_ZREC_JSON_HANDLER  ZSD_REC_PRINT_NEW (ZREC_PRINT)     SAP_ZREC    (per company)
+  zrec     /sap/zrec   ZCL_ZREC_JSON_HANDLER  ZSD_REC_PRINT_NEW (ZREC_PRINT)     SAP_ZREC    (per company
+                                           per calendar year - CALL_KEY "1010 2024")
   zdapp    /sap/zdapp  ZCL_DAPP_JSON_HANDLER  ZSDR_DUE_PAYMENT (ZSD_DAPP)        SAP_ZDAPP   (per company,
                                            Due and Undue separately - CALL_KEY "1010 due")
   zalr_np  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Non-Project      SAP_ZALR_NP (per view:
@@ -182,7 +183,7 @@ class Feed:
     def scope(self, s):
         """Text for the load log: which calls this run makes."""
         if self.key == "zrec":
-            return "companies " + s["companies"]
+            return f"companies {s['companies']} · one call per year from {s['extra'].get('from')}"
         if self.key == "zdapp":
             return f"companies {s['companies']} · {s['views']}"
         if self.key == "zalr_np":
@@ -198,7 +199,13 @@ class Feed:
             ws = _csv(s["werks"]) if s["werks"] != "*" else [None]
             return [((f"project {w}" if w else "all projects"), ({"werks": w} if w else {})) for w in ws]
         if k == "zrec":
-            return [(f"company {b}", {"bukrs": b}) for b in _csv(s["companies"])]
+            # one call per company per calendar year (receipt posting date) - small calls that stay
+            # far below SAP's ICM timeout; a receipt falls in exactly one year, so nothing repeats
+            start = int(str(s["extra"].get("from", "2015-01-01"))[:4])
+            today = datetime.now().date()
+            return [(f"company {b} {y}", {"bukrs": b, "from": f"{y}-01-01",
+                                          "to": (f"{y}-12-31" if y < today.year else today.isoformat())})
+                    for b in _csv(s["companies"]) for y in range(start, today.year + 1)]
         if k == "zdapp":
             return [(f"company {b} {v}", {"bukrs": b, "view": v})
                     for b in _csv(s["companies"]) for v in _csv(s["views"])]
