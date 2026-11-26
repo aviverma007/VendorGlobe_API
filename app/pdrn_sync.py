@@ -10,8 +10,9 @@ SAP reports -> SQL Server, twice a day (13:00 and 17:00 server time). One engine
                                            per calendar year - CALL_KEY "1010 2024")
   zdapp    /sap/zdapp  ZCL_DAPP_JSON_HANDLER  ZSDR_DUE_PAYMENT (ZSD_DAPP)        SAP_ZDAPP   (per company,
                                            Due and Undue separately - CALL_KEY "1010 due")
-  zalr_np  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Non-Project      SAP_ZALR_NP (per view:
-                                           Item Wise PO, Summary, Total Actual - FY 2024 -> now)
+  zalr_np  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Non-Project      SAP_ZALR_NP (per view x 5
+                                           definitions: Item Wise PO, Summary, Total Actual - FY 2024 -> now;
+                                           CALL_KEY "np_po HO1000-RE1060")
   zalr_pj  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Project          SAP_ZALR_PJ (per Project
                                            definition from view=projlist, project to date)
   Every row also carries CALL_KEY = the company / view / project definition of the call it came from.
@@ -46,8 +47,10 @@ values there win). Read on every run, so a new password needs no restart.
   ZREC:    VG_ZREC_ENABLED (1), VG_ZREC_BUKRS (1010,1070,2010,2070,3070), VG_ZREC_FROM (2015-01-01)
   ZDAPP:   VG_ZDAPP_ENABLED (1), VG_ZDAPP_BUKRS (same 5 companies), VG_ZDAPP_VIEWS (due,undue)
   ZALR_NP: VG_ZALR_NP_ENABLED (1), VG_ZALR_NP_VIEWS (np_po,np_summary,np_total_actual),
-           VG_ZALR_NP_PSPHI (*), VG_ZALR_NP_YEARS (2024-<current fiscal year>)
-  ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition, or a comma list)
+           VG_ZALR_NP_PSPHI (the 46 Non-Project definitions in NP_DEFS), VG_ZALR_NP_BATCH (5 per call),
+           VG_ZALR_NP_YEARS (2024-<current fiscal year>)
+  ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition except the
+           Non-Project ones above, or a comma list)
   Any feed: VG_<FEED>_URL / _CLIENT / _TIMEOUT / _MIN_RATIO / _USER / _PASSWORD override the shared value.
 
 Standalone:  python app\\pdrn_sync.py --once [feed ...]     (load now; default all enabled)
@@ -173,8 +176,8 @@ class Feed:
             s["extra"] = {}
         elif k == "zalr_np":
             s["views"] = _env("ZALR_NP_VIEWS", "np_po,np_summary,np_total_actual")
-            s["extra"] = {"psphi": _env("ZALR_NP_PSPHI", "*"),
-                          "year": _env("ZALR_NP_YEARS", f"2024-{_fy_start_year()}")}
+            s["batch"] = int(_env("ZALR_NP_BATCH", "5"))    # definitions per SAP call
+            s["extra"] = {"year": _env("ZALR_NP_YEARS", f"2024-{_fy_start_year()}")}
         elif k == "zalr_pj":
             s["psphi"] = _env("ZALR_PJ_PSPHI", "*")
             s["extra"] = {}
@@ -187,7 +190,7 @@ class Feed:
         if self.key == "zdapp":
             return f"companies {s['companies']} · {s['views']}"
         if self.key == "zalr_np":
-            return f"{s['views']} · years {s['extra']['year']}"
+            return f"{s['views']} · years {s['extra']['year']} · {len(_np_defs())} definitions"
         if self.key == "zalr_pj":
             return "project definitions " + s["psphi"]
         return s["werks"]
@@ -210,15 +213,21 @@ class Feed:
             return [(f"company {b} {v}", {"bukrs": b, "view": v})
                     for b in _csv(s["companies"]) for v in _csv(s["views"])]
         if k == "zalr_np":
-            return [(f"view {v}", {"view": v}) for v in _csv(s["views"])]
+            # every view, a few Non-Project definitions per call (one call for all of them ran past
+            # SAP's ICM timeout); each WBS belongs to one definition, so nothing repeats
+            defs, n = _np_defs(), max(1, s["batch"])
+            groups = [defs[i:i + n] for i in range(0, len(defs), n)]
+            return [(f"view {v} {g[0]}-{g[-1]}", {"view": v, "psphi": ",".join(g)})
+                    for v in _csv(s["views"]) for g in groups]
         if k == "zalr_pj":
             if s["psphi"] != "*":
                 defs = _csv(s["psphi"])
             else:
                 # every Project definition SAP knows (budget profile ZPSWB2 = Non-Project, skipped)
                 rows, _ = _fetch(self, s, {"view": "projlist", "psphi": "*"})
-                defs = sorted({str(r.get("PSPID") or "").strip() for r in rows
-                               if str(r.get("BPROF") or "").strip() != "ZPSWB2"} - {""})
+                np_defs = set(_np_defs())
+                defs = sorted({str(r.get("PSPID") or "").strip().replace("/", "").upper() for r in rows
+                               if str(r.get("BPROF") or "").strip() != "ZPSWB2"} - {""} - np_defs)
                 if not defs:
                     raise RuntimeError("view=projlist returned no Project definitions")
             return [(f"project {d}", {"view": "project", "psphi": d}) for d in defs]
@@ -232,6 +241,18 @@ class Feed:
 
 
 COMPANIES = "1010,1070,2010,2070,3070"
+# Non-Project definitions (from the 30-Oct-2026 ZALR Non-Project exports). In PRD some of them (HO1000,
+# HO2080) do not carry budget profile ZPSWB2, so the profile alone cannot tell them apart: this list
+# decides what the Non-Project feed loads and what the Project feed leaves out. New ones: add them to
+# VG_ZALR_NP_PSPHI in pdrn.env (the full comma list replaces this one).
+NP_DEFS = ("HO1000,HO2080,RE0062,RE0075,RE1040,RE1050,RE1060,RE1080,RE1090,RE1110,RE1130,RE2000,RE2020,"
+           "RE2030,RE2040,RE2050,RE2060,RE2090,RE3000,RE3010,RE3020,RE3030,RE3040,RE3050,RE3060,RE3080,"
+           "RE3090,RE4000,RE4010,RE4020,RE4030,RE4050,RE4060,RE4070,RE4080,RE4090,RE5000,RE5010,RE5020,"
+           "RE5030,RE5040,RE6600,RE6700,RE6900,RE9800,REM110")
+
+
+def _np_defs():
+    return [d.replace("/", "").upper() for d in _csv(_env("ZALR_NP_PSPHI", NP_DEFS))]
 FEEDS = {
     "invr": Feed("invr", "ZSD_INVR", "/sap/zinvr", "SAP_INVR", "VMSTB", None, None, False),
     "pdrn": Feed("pdrn", "ZSD_PDRN", "/sap/zpdrn", "SAP_PDRN", "BUKST", {"ACTIVE", "CANCELLED"},
