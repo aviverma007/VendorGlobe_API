@@ -83,10 +83,14 @@ PROJECTS = "1011,1013,1070,1072,2010,2071,3072,3073"
 LOCAL_ADDRS = {"127.0.0.1", "::1", "localhost"}
 
 
+_FROM_FILE = set()      # keys that came from pdrn.env (a line deleted there is dropped again)
+
+
 def _load_env_file(path=ENV_FILE):
     """KEY=VALUE lines; '#' comments only at line start (passwords may contain '#')."""
     if not os.path.exists(path):
         return False
+    seen = set()
     with open(path, encoding="utf-8-sig") as fh:
         for line in fh:
             line = line.strip()
@@ -98,6 +102,11 @@ def _load_env_file(path=ENV_FILE):
                 v = v[1:-1]
             if k:
                 os.environ[k] = v
+                seen.add(k)
+    for k in _FROM_FILE - seen:      # removed from pdrn.env since the last read
+        os.environ.pop(k, None)
+    _FROM_FILE.clear()
+    _FROM_FILE.update(seen)
     return True
 
 
