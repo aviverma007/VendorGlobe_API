@@ -11,7 +11,7 @@ SAP reports -> SQL Server, twice a day (13:00 and 17:00 server time). One engine
   zdapp    /sap/zdapp  ZCL_DAPP_JSON_HANDLER  ZSDR_DUE_PAYMENT (ZSD_DAPP)        SAP_ZDAPP   (per company,
                                            Due and Undue separately - CALL_KEY "1010 due")
   zalr_np  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Non-Project      SAP_ZALR_NP (per view x 5
-                                           definitions: Item Wise PO, Summary, Total Actual - FY 2024 -> now;
+                                           definitions: Item Wise PO, Summary, Total Actual - current FY;
                                            CALL_KEY "np_po HO1000-RE1060")
   zalr_pj  /sap/zalr   ZCL_ZALR_JSON_HANDLER  ZALR_PROG2 (ZALR) Project          SAP_ZALR_PJ (per Project
                                            definition from view=projlist, project to date)
@@ -48,7 +48,7 @@ values there win). Read on every run, so a new password needs no restart.
   ZDAPP:   VG_ZDAPP_ENABLED (1), VG_ZDAPP_BUKRS (same 5 companies), VG_ZDAPP_VIEWS (due,undue)
   ZALR_NP: VG_ZALR_NP_ENABLED (1), VG_ZALR_NP_VIEWS (np_po,np_summary,np_total_actual),
            VG_ZALR_NP_PSPHI (the 46 Non-Project definitions in NP_DEFS), VG_ZALR_NP_BATCH (5 per call),
-           VG_ZALR_NP_YEARS (2024-<current fiscal year>)
+           VG_ZALR_NP_YEARS (current fiscal year, e.g. 2026 = FY 2026-27; "2025-2026" for two)
   ZALR_PJ: VG_ZALR_PJ_ENABLED (1), VG_ZALR_PJ_PSPHI (* = every Project definition except the
            Non-Project ones above, or a comma list)
   Any feed: VG_<FEED>_URL / _CLIENT / _TIMEOUT / _MIN_RATIO / _USER / _PASSWORD override the shared value.
@@ -177,7 +177,9 @@ class Feed:
         elif k == "zalr_np":
             s["views"] = _env("ZALR_NP_VIEWS", "np_po,np_summary,np_total_actual")
             s["batch"] = int(_env("ZALR_NP_BATCH", "5"))    # definitions per SAP call
-            s["extra"] = {"year": _env("ZALR_NP_YEARS", f"2024-{_fy_start_year()}")}
+            # Non-Project WBS are per fiscal year (…-F26-…): load the CURRENT fiscal year only, as the
+            # manual FY exports did (it moves to the next year by itself every April)
+            s["extra"] = {"year": _env("ZALR_NP_YEARS", str(_fy_start_year()))}
         elif k == "zalr_pj":
             s["psphi"] = _env("ZALR_PJ_PSPHI", "*")
             s["extra"] = {}
